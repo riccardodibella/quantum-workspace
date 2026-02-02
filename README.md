@@ -1,1 +1,1 @@
-# netsquid-workspace
+# quantum-workspace
