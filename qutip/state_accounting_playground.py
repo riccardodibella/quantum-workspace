@@ -200,46 +200,12 @@ N = 2
 vertical_displacement = 1
 loss_prob = 1E-2
 
-NUM_CHANNEL_QUBITS = 2
-num_tx_qubits = 2
-num_rx_qubits = 1
-
-initial_channel_states = [qt.basis(2, 0), qt.basis(N, 0), qt.basis(N, 0), qt.basis(2, 0)]
-states_per_channel_qubit = len(initial_channel_states)
-
-all_states = qt.ket2dm(qt.tensor([qt.basis(2,0)]*num_tx_qubits + initial_channel_states*NUM_CHANNEL_QUBITS + [qt.basis(2,0)]*num_rx_qubits))
-
-def tx_qubit_positions() -> list[int]:
-    return list(range(num_tx_qubits))
-    
-def channel_states_positions():
-    starting_offset = len(tx_qubit_positions())
-
-    pos_list = []
-    for num_channel_qubit in range(NUM_CHANNEL_QUBITS):
-        for i in range(states_per_channel_qubit):
-            pos_list+=[starting_offset + num_channel_qubit*states_per_channel_qubit + i]
-    return pos_list
-
-def rx_qubit_positions() -> list[int]:
-    # The RX block starts where the Channel block ends
-    start_idx = num_tx_qubits + (NUM_CHANNEL_QUBITS * states_per_channel_qubit)
-    return list(range(start_idx, start_idx + num_rx_qubits))
-
-def ptrace_away_positions(states: qt.Qobj, positions: int | list[int]) -> qt.Qobj:
-    if type(positions) is int:
-        positions = [positions]
-
-    keep_indices = [i for i in range(len(all_states.dims[0])) if i not in positions]
-    return states.ptrace(keep_indices)
-
-
 
 
 state_index_dict = {}
 all_states: qt.Qobj | None = None
 
-def add_system(dimensions, key):
+def add_subsystem(dimensions, key):
     global all_states, state_index_dict
     num_systems = 0 if all_states is None else len(all_states.dims[0])
     state_index_dict[key] = num_systems
@@ -251,49 +217,64 @@ def add_system(dimensions, key):
     else:
         all_states = qt.tensor(all_states, qt.ket2dm(qt.basis(dimensions, 0)))
 
-def ptrace_system(key):
+def ptrace_subsystem(key):
     global all_states, state_index_dict
     if(all_states is None):
         raise Exception("ptrace_system None state")
     index = state_index_dict[key]
     num_systems = 0 if all_states is None else len(all_states.dims[0])
-    all_states = all_states.ptrace()
+    all_states = all_states.ptrace([i for i in range(num_systems) if i != index])
+
+    del state_index_dict[key]
+    for k, v in state_index_dict.items():
+        if v > index:
+            state_index_dict[k] = v-1
 
 
+NUM_CHANNEL_QUBITS = 3
+
+# all_states = qt.ket2dm(qt.tensor([qt.basis(2,0)]*num_tx_qubits + initial_channel_states*NUM_CHANNEL_QUBITS + [qt.basis(2,0)]*num_rx_qubits))
+add_subsystem(2, "tx_edge")
+add_subsystem(2, "tx_temp")
+
+print(state_index_dict["tx_edge"])
+print(state_index_dict["tx_temp"])
+
+all_states = apply_hadamard(all_states, state_index_dict["tx_edge"])
+all_states = apply_cnot(all_states, state_index_dict["tx_edge"], state_index_dict["tx_temp"])
+
+for i in range(NUM_CHANNEL_QUBITS):
+    add_subsystem(2, f"channel_{i}_tx")
+
+all_states = apply_swap(all_states, state_index_dict["tx_temp"], state_index_dict[f"channel_{0}_tx"])
+print(all_states.ptrace([state_index_dict["tx_edge"], state_index_dict[f"channel_{0}_tx"]]))
+
+ptrace_subsystem("tx_temp")
+
+print(state_index_dict["tx_edge"], state_index_dict[f"channel_{0}_tx"])
+print(all_states.ptrace([state_index_dict["tx_edge"], state_index_dict[f"channel_{0}_tx"]]))
+
+for i in range(NUM_CHANNEL_QUBITS):
+    add_subsystem(N, f"channel_{i}_cat")
+    all_states = apply_cat_state_encoding(all_states, state_index_dict[f"channel_{i}_tx"], state_index_dict[f"channel_{i}_cat"], vertical_displacement, N)
+    ptrace_subsystem(f"channel_{i}_tx")
+    add_subsystem(N, f"channel_{i}_vacuum")
+    all_states = beamsplitter_general(all_states, state_index_dict[f"channel_{i}_cat"], state_index_dict[f"channel_{i}_vacuum"], loss_prob)
+    add_subsystem(2, f"channel_{i}_rx")
+    all_states = apply_ideal_cat_state_decoding(all_states, state_index_dict[f"channel_{i}_rx"], state_index_dict[f"channel_{i}_cat"], vertical_displacement, N)
+    ptrace_subsystem(f"channel_{i}_cat")
+    ptrace_subsystem(f"channel_{i}_vacuum")
+
+print(all_states.ptrace([state_index_dict["tx_edge"], state_index_dict[f"channel_{0}_rx"]]))
+
+add_subsystem(2, "rx_edge")
+all_states = apply_swap(all_states, state_index_dict[f"channel_{0}_rx"], state_index_dict["rx_edge"])
+
+for i in range(NUM_CHANNEL_QUBITS):
+    ptrace_subsystem(f"channel_{i}_rx")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-all_states = apply_hadamard(all_states, tx_qubit_positions()[0])
-all_states = apply_cnot(all_states, tx_qubit_positions()[0], tx_qubit_positions()[1])
-
-all_states = apply_swap(all_states, tx_qubit_positions()[1], channel_states_positions()[0])
-
-for channel_qubit_index in range(NUM_CHANNEL_QUBITS):
-    all_states = apply_cat_state_encoding(all_states, channel_states_positions()[channel_qubit_index*states_per_channel_qubit+0], channel_states_positions()[channel_qubit_index*states_per_channel_qubit+1], vertical_displacement, N)
-
-
-for channel_qubit_index in range(NUM_CHANNEL_QUBITS):
-    all_states = beamsplitter_general(all_states, channel_states_positions()[channel_qubit_index*states_per_channel_qubit+1], channel_states_positions()[channel_qubit_index*states_per_channel_qubit+2], loss_prob)
-
-for channel_qubit_index in range(NUM_CHANNEL_QUBITS):
-    all_states = apply_ideal_cat_state_decoding(all_states, channel_states_positions()[channel_qubit_index*states_per_channel_qubit+3], channel_states_positions()[channel_qubit_index*states_per_channel_qubit+1], vertical_displacement, N)
-
-all_states = apply_swap(all_states, channel_states_positions()[states_per_channel_qubit-1], rx_qubit_positions()[0])
-edge_qubits = all_states.ptrace([tx_qubit_positions()[0], rx_qubit_positions()[0]])
+edge_qubits = all_states.ptrace([state_index_dict["tx_edge"], state_index_dict["rx_edge"]])
 
 print(edge_qubits)
 fid = qt.fidelity(edge_qubits, ideal_rho)
