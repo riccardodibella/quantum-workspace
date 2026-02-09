@@ -251,24 +251,28 @@ def repetition_encode(state: qt.Qobj, source_index: int, target_index_list: list
     return state
 
 def repetition_decode(state: qt.Qobj, target_index: int, source_index_list: list[int]) -> qt.Qobj:
-    # 1. Map the error syndromes
-    # We use source_index_list[0] as the 'main' qubit.
-    # We CNOT it into the others to see if they differ.
     for i in range(1, len(source_index_list)):
         state = apply_cnot(state, source_index_list[0], source_index_list[i])
-    
-    # 2. Majority Vote (The Correction Step)
-    # If source_index_list[1] AND source_index_list[2] are both 1, 
-    # it means the 'main' qubit (index 0) is the one that actually flipped.
     if len(source_index_list) == 3:
         state = apply_toffoli(state, source_index_list[1], source_index_list[2], source_index_list[0])
     else:
         print("unsupported decoding for n != 3")
         exit()
-    
-    # 3. Transfer the corrected state to the target (rx_edge)
     state = apply_swap(state, source_index_list[0], target_index)
-    
+    return state
+
+def phase_repetition_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
+    state = apply_hadamard(state, source_index)
+    state = repetition_encode(state, source_index, target_index_list)
+    for idx in target_index_list:
+        state = apply_hadamard(state, idx)
+    return state
+
+def phase_repetition_decode(state: qt.Qobj, target_index: int, source_index_list: list[int]) -> qt.Qobj:
+    for idx in source_index_list:
+        state = apply_hadamard(state, idx)
+    state = repetition_decode(state, target_index, source_index_list)
+    state = apply_hadamard(state, target_index)
     return state
 
 def shor_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
@@ -350,22 +354,27 @@ def shor_decode(state: qt.Qobj, target_index: int, source_index_list: list[int])
 
 class EncodingType(Enum):
     SWAP_DUMMY_ENCODING = 1
-    REPETITION_3_QUBITS = 2
-    SHOR_9_QUBITS = 3
+    REPETITION_BIT_FLIP = 2
+    REPETITION_PHASE_FLIP = 3
+    SHOR_9_QUBITS = 4
 
 def generic_encode(state: qt.Qobj, source_index: int, target_index_list: list[int], encoding: EncodingType) -> qt.Qobj:
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
         return swap_encode(state, source_index, target_index_list)
-    if encoding is EncodingType.REPETITION_3_QUBITS:
+    if encoding is EncodingType.REPETITION_BIT_FLIP:
         return repetition_encode(state, source_index, target_index_list)
+    if encoding is EncodingType.REPETITION_PHASE_FLIP:
+        return phase_repetition_encode(state, source_index, target_index_list)
     if encoding is EncodingType.SHOR_9_QUBITS:
         return shor_encode(state, source_index, target_index_list)
 
 def generic_decode(state: qt.Qobj, target_index: int, source_index_list: list[int], encoding: EncodingType) -> qt.Qobj:
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
         return swap_decode(state, target_index, source_index_list)
-    if encoding is EncodingType.REPETITION_3_QUBITS:
+    if encoding is EncodingType.REPETITION_BIT_FLIP:
         return repetition_decode(state, target_index, source_index_list)
+    if encoding is EncodingType.REPETITION_PHASE_FLIP:
+        return phase_repetition_decode(state, target_index, source_index_list)
     if encoding is EncodingType.SHOR_9_QUBITS:
         return shor_decode(state, target_index, source_index_list)
 
@@ -463,25 +472,28 @@ vertical_displacement = 1.5
 loss_prob_list = np.logspace(np.log10(0.75), np.log10(0.001), num=20)
 
 res_shor_list = []
-res_3_qubit_list = []
+res_bit_repetition_list = []
+res_phase_repetition_list = []
 res_swap_list = []
 
 for loss_prob in loss_prob_list:
     print(f"{loss_prob}")
     res_shor_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=9, encoding_type=EncodingType.SHOR_9_QUBITS)]
-    res_3_qubit_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_3_QUBITS)]
+    res_bit_repetition_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_BIT_FLIP)]
+    res_phase_repetition_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_PHASE_FLIP)]
     res_swap_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=1, encoding_type=EncodingType.SWAP_DUMMY_ENCODING)]
 
 
 # Add 'label' to each plot, and markers (o, s, ^) to distinguish points
-plt.semilogx(loss_prob_list, res_shor_list,    'o-', label='Shor Code (9 qubits)')
-plt.semilogx(loss_prob_list, res_3_qubit_list, 's-', label='Repetition Code (3 qubits)')
-plt.semilogx(loss_prob_list, res_swap_list,    '^-', label='No Encoding (1 qubit)')
+plt.loglog(loss_prob_list, res_shor_list,    'o-', label='Shor Code (9 qubits)')
+plt.loglog(loss_prob_list, res_bit_repetition_list, 's-', label='Bit Flip Repetition Code (3 qubits)')
+plt.loglog(loss_prob_list, res_phase_repetition_list, 's-', label='Phase Flip Repetition Code (3 qubits)')
+plt.loglog(loss_prob_list, res_swap_list,    '^-', label='No Encoding (1 qubit)')
 
 # Add axis labels and title
 plt.xlabel('Loss Probability')
-plt.ylabel('1-Fidelity')
-plt.title('Infidelity vs Channel Loss for Different Encodings')
+plt.ylabel('Fidelity')
+plt.title('Fidelity vs Channel Loss for Different Encodings')
 
 # Enable the legend
 plt.legend()
