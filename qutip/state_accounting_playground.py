@@ -4,6 +4,8 @@ from IPython.display import Image
 from math import *
 import qutip as qt
 import qutip.qip
+from enum import Enum
+
 # set a parameter to see animations in line
 from matplotlib import rc
 rc('animation', html='jshtml')
@@ -186,34 +188,6 @@ def apply_swap(state: qt.Qobj, idx1: int, idx2: int) -> qt.Qobj:
     return state
 
 
-def repetition_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
-    state = apply_swap(state, source_index, target_index_list[0])
-    for i in range(1, len(target_index_list)):
-        target_index = target_index_list[i]
-        state = apply_cnot(state, target_index_list[0], target_index)
-    return state
-
-def repetition_decode(state: qt.Qobj, target_index: int, source_index_list: list[int]) -> qt.Qobj:
-    # 1. Map the error syndromes
-    # We use source_index_list[0] as the 'main' qubit.
-    # We CNOT it into the others to see if they differ.
-    for i in range(1, len(source_index_list)):
-        state = apply_cnot(state, source_index_list[0], source_index_list[i])
-    
-    # 2. Majority Vote (The Correction Step)
-    # If source_index_list[1] AND source_index_list[2] are both 1, 
-    # it means the 'main' qubit (index 0) is the one that actually flipped.
-    if len(source_index_list) == 3:
-        state = apply_toffoli(state, source_index_list[1], source_index_list[2], source_index_list[0])
-    else:
-        print("unsupported decoding for n != 3")
-        exit()
-    
-    # 3. Transfer the corrected state to the target (rx_edge)
-    state = apply_swap(state, source_index_list[0], target_index)
-    
-    return state
-
 def apply_toffoli(state: qt.Qobj, ctrl1: int, ctrl2: int, target: int) -> qt.Qobj:
     dims = state.dims[0]
     # Identity on all subsystems
@@ -242,6 +216,56 @@ def apply_toffoli(state: qt.Qobj, ctrl1: int, ctrl2: int, target: int) -> qt.Qob
         return U_toffoli * state * U_toffoli.dag()
 
 
+def swap_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
+    state = apply_swap(state, source_index, target_index_list[0])
+    return state
+
+def swap_decode(state: qt.Qobj, target_index: int, source_index_list: list[int]) -> qt.Qobj:
+    state = apply_swap(state, source_index_list[0], target_index)
+    return state
+
+def repetition_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
+    state = apply_swap(state, source_index, target_index_list[0])
+    for i in range(1, len(target_index_list)):
+        target_index = target_index_list[i]
+        state = apply_cnot(state, target_index_list[0], target_index)
+    return state
+
+def repetition_decode(state: qt.Qobj, target_index: int, source_index_list: list[int]) -> qt.Qobj:
+    # 1. Map the error syndromes
+    # We use source_index_list[0] as the 'main' qubit.
+    # We CNOT it into the others to see if they differ.
+    for i in range(1, len(source_index_list)):
+        state = apply_cnot(state, source_index_list[0], source_index_list[i])
+    
+    # 2. Majority Vote (The Correction Step)
+    # If source_index_list[1] AND source_index_list[2] are both 1, 
+    # it means the 'main' qubit (index 0) is the one that actually flipped.
+    if len(source_index_list) == 3:
+        state = apply_toffoli(state, source_index_list[1], source_index_list[2], source_index_list[0])
+    else:
+        print("unsupported decoding for n != 3")
+        exit()
+    
+    # 3. Transfer the corrected state to the target (rx_edge)
+    state = apply_swap(state, source_index_list[0], target_index)
+    
+    return state
+
+
+class EncodingType(Enum):
+    NO_ENCODING = 1
+    REPETITION_3_QUBITS = 2
+def generic_encode(state: qt.Qobj, source_index: int, target_index_list: list[int], encoding: EncodingType) -> qt.Qobj:
+    if(encoding is EncodingType.NO_ENCODING):
+        return swap_encode(state, source_index, target_index_list)
+    if(encoding is EncodingType.REPETITION_3_QUBITS):
+        return repetition_encode(state, source_index, target_index_list)
+def generic_decode(state: qt.Qobj, target_index: int, source_index_list: list[int], encoding: EncodingType) -> qt.Qobj:
+    if(encoding is EncodingType.NO_ENCODING):
+        return swap_decode(state, target_index, source_index_list)
+    if(encoding is EncodingType.REPETITION_3_QUBITS):
+        return repetition_decode(state, target_index, source_index_list)
 
 
 ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
@@ -254,7 +278,8 @@ ideal_rho = qt.ket2dm(ideal_phi_plus)
 N = 20
 vertical_displacement = 2
 loss_prob = 0.2
-
+NUM_CHANNEL_QUBITS = 3
+encoding_type = EncodingType.REPETITION_3_QUBITS
 
 
 state_index_dict = {}
@@ -286,8 +311,6 @@ def ptrace_subsystem(key):
             state_index_dict[k] = v-1
 
 
-NUM_CHANNEL_QUBITS = 3
-
 # all_states = qt.ket2dm(qt.tensor([qt.basis(2,0)]*num_tx_qubits + initial_channel_states*NUM_CHANNEL_QUBITS + [qt.basis(2,0)]*num_rx_qubits))
 add_subsystem(2, "tx_edge")
 add_subsystem(2, "tx_temp")
@@ -299,7 +322,7 @@ for i in range(NUM_CHANNEL_QUBITS):
     add_subsystem(2, f"channel_{i}_tx")
 
 #all_states = apply_swap(all_states, state_index_dict["tx_temp"], state_index_dict[f"channel_{0}_tx"])
-all_states = repetition_encode(all_states, state_index_dict["tx_temp"], [state_index_dict[f"channel_{0}_tx"], state_index_dict[f"channel_{1}_tx"], state_index_dict[f"channel_{2}_tx"]])
+all_states = generic_encode(all_states, state_index_dict["tx_temp"], [state_index_dict[f"channel_{0}_tx"], state_index_dict[f"channel_{1}_tx"], state_index_dict[f"channel_{2}_tx"]], encoding_type)
 
 ptrace_subsystem("tx_temp")
 
@@ -317,7 +340,7 @@ for i in range(NUM_CHANNEL_QUBITS):
 add_subsystem(2, "rx_edge")
 
 #all_states = apply_swap(all_states, state_index_dict[f"channel_{0}_rx"], state_index_dict["rx_edge"])
-all_states = repetition_decode(all_states, state_index_dict["rx_edge"], [state_index_dict[f"channel_{0}_rx"], state_index_dict[f"channel_{1}_rx"], state_index_dict[f"channel_{2}_rx"]])
+all_states = generic_decode(all_states, state_index_dict["rx_edge"], [state_index_dict[f"channel_{0}_rx"], state_index_dict[f"channel_{1}_rx"], state_index_dict[f"channel_{2}_rx"]], encoding_type)
 
 for i in range(NUM_CHANNEL_QUBITS):
     ptrace_subsystem(f"channel_{i}_rx")
