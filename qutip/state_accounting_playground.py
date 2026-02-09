@@ -186,6 +186,61 @@ def apply_swap(state: qt.Qobj, idx1: int, idx2: int) -> qt.Qobj:
     return state
 
 
+def repetition_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
+    state = apply_swap(state, source_index, target_index_list[0])
+    for i in range(1, len(target_index_list)):
+        target_index = target_index_list[i]
+        state = apply_cnot(state, target_index_list[0], target_index)
+    return state
+
+def repetition_decode(state: qt.Qobj, target_index: int, source_index_list: list[int]) -> qt.Qobj:
+    # 1. Map the error syndromes
+    # We use source_index_list[0] as the 'main' qubit.
+    # We CNOT it into the others to see if they differ.
+    for i in range(1, len(source_index_list)):
+        state = apply_cnot(state, source_index_list[0], source_index_list[i])
+    
+    # 2. Majority Vote (The Correction Step)
+    # If source_index_list[1] AND source_index_list[2] are both 1, 
+    # it means the 'main' qubit (index 0) is the one that actually flipped.
+    if len(source_index_list) == 3:
+        state = apply_toffoli(state, source_index_list[1], source_index_list[2], source_index_list[0])
+    else:
+        print("unsupported decoding for n != 3")
+        exit()
+    
+    # 3. Transfer the corrected state to the target (rx_edge)
+    state = apply_swap(state, source_index_list[0], target_index)
+    
+    return state
+
+def apply_toffoli(state: qt.Qobj, ctrl1: int, ctrl2: int, target: int) -> qt.Qobj:
+    dims = state.dims[0]
+    # Identity on all subsystems
+    op_list_id = [qt.qeye(d) for d in dims]
+    
+    # The Toffoli gate: I + |11><11| ⊗ (X - I)
+    # This only acts when both controls are in the |1> state
+    proj_11 = [qt.qeye(d) for d in dims]
+    proj_11[ctrl1] = qt.basis(2, 1).proj()
+    proj_11[ctrl2] = qt.basis(2, 1).proj()
+    
+    # The operator (X - I) on the target
+    op_x_minus_i = [qt.qeye(d) for d in dims]
+    op_x_minus_i[target] = qt.sigmax() - qt.qeye(2)
+    
+    # Combine: U = Identity + (Projector_11 * Target_Flip_Logic)
+    # We use element-wise multiplication of the lists to build the tensor components
+    U_toffoli = qt.tensor(op_list_id) + (qt.tensor(proj_11) * qt.tensor(op_list_id).dag() * qt.tensor(op_x_minus_i))
+    
+    # Faster/Cleaner alternative for U_toffoli if dimensions are standard:
+    # U_toffoli = qt.tensor(op_list_id) + qt.tensor([qt.basis(2,1).proj() if i == ctrl1 or i == ctrl2 else (qt.sigmax()-qt.qeye(2)) if i == target else qt.qeye(d) for i, d in enumerate(dims)])
+
+    if state.isket:
+        return U_toffoli * state
+    else:
+        return U_toffoli * state * U_toffoli.dag()
+
 
 
 
@@ -196,9 +251,9 @@ ideal_rho = qt.ket2dm(ideal_phi_plus)
 
 
 
-N = 2
-vertical_displacement = 1
-loss_prob = 1E-2
+N = 20
+vertical_displacement = 2
+loss_prob = 0.2
 
 
 
@@ -237,22 +292,16 @@ NUM_CHANNEL_QUBITS = 3
 add_subsystem(2, "tx_edge")
 add_subsystem(2, "tx_temp")
 
-print(state_index_dict["tx_edge"])
-print(state_index_dict["tx_temp"])
-
 all_states = apply_hadamard(all_states, state_index_dict["tx_edge"])
 all_states = apply_cnot(all_states, state_index_dict["tx_edge"], state_index_dict["tx_temp"])
 
 for i in range(NUM_CHANNEL_QUBITS):
     add_subsystem(2, f"channel_{i}_tx")
 
-all_states = apply_swap(all_states, state_index_dict["tx_temp"], state_index_dict[f"channel_{0}_tx"])
-print(all_states.ptrace([state_index_dict["tx_edge"], state_index_dict[f"channel_{0}_tx"]]))
+#all_states = apply_swap(all_states, state_index_dict["tx_temp"], state_index_dict[f"channel_{0}_tx"])
+all_states = repetition_encode(all_states, state_index_dict["tx_temp"], [state_index_dict[f"channel_{0}_tx"], state_index_dict[f"channel_{1}_tx"], state_index_dict[f"channel_{2}_tx"]])
 
 ptrace_subsystem("tx_temp")
-
-print(state_index_dict["tx_edge"], state_index_dict[f"channel_{0}_tx"])
-print(all_states.ptrace([state_index_dict["tx_edge"], state_index_dict[f"channel_{0}_tx"]]))
 
 for i in range(NUM_CHANNEL_QUBITS):
     add_subsystem(N, f"channel_{i}_cat")
@@ -265,10 +314,10 @@ for i in range(NUM_CHANNEL_QUBITS):
     ptrace_subsystem(f"channel_{i}_cat")
     ptrace_subsystem(f"channel_{i}_vacuum")
 
-print(all_states.ptrace([state_index_dict["tx_edge"], state_index_dict[f"channel_{0}_rx"]]))
-
 add_subsystem(2, "rx_edge")
-all_states = apply_swap(all_states, state_index_dict[f"channel_{0}_rx"], state_index_dict["rx_edge"])
+
+#all_states = apply_swap(all_states, state_index_dict[f"channel_{0}_rx"], state_index_dict["rx_edge"])
+all_states = repetition_decode(all_states, state_index_dict["rx_edge"], [state_index_dict[f"channel_{0}_rx"], state_index_dict[f"channel_{1}_rx"], state_index_dict[f"channel_{2}_rx"]])
 
 for i in range(NUM_CHANNEL_QUBITS):
     ptrace_subsystem(f"channel_{i}_rx")
