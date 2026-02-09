@@ -112,41 +112,60 @@ def apply_ideal_cat_state_decoding(input_states: qt.Qobj, qubit_position: int, c
         return U_total * input_states * U_total.dag()
 
 def beamsplitter_general(input_state: qt.Qobj, idx1: int, idx2: int, transmissivity: float) -> qt.Qobj:
-    # 1. Get the global dimensions of the system
-    # dims will be something like [2, 2, 20, 20] (Qubit0, Qubit1, CV0, CV1)
     dims = input_state.dims[0]
     num_subsystems = len(dims)
     
-    # 2. Extract cutoff dimensions for the two target CV modes
+    # 1. Define local subspace dimensions
     N1 = dims[idx1]
     N2 = dims[idx2]
     
-    # 3. Create the annihilation operators in the full Hilbert space
-    # We start with a list of identities for every subsystem
-    op_list1 = [qt.qeye(d) for d in dims]
-    op_list2 = [qt.qeye(d) for d in dims]
+    # 2. Compute the Beam Splitter Unitary on the small (N x N) subsystem
+    #    This is fast (e.g., 16x16 matrix for N=4)
+    a1_loc = qt.tensor(qt.destroy(N1), qt.qeye(N2))
+    a2_loc = qt.tensor(qt.qeye(N1), qt.destroy(N2))
     
-    # Replace the identities at the target indices with destroy operators
-    op_list1[idx1] = qt.destroy(N1)
-    op_list2[idx2] = qt.destroy(N2)
-    
-    # Tensor them together to get operators acting on the full system
-    a1 = qt.tensor(op_list1)
-    a2 = qt.tensor(op_list2)
-
-    # 4. Calculate mixing angle
     theta = np.arcsin(np.sqrt(transmissivity))
+    generator = theta * (a1_loc.dag() * a2_loc - a1_loc * a2_loc.dag())
+    U_local = generator.expm()
 
-    # 5. Build the Unitary for the full space
-    # U = exp( theta * (a1^dag a2 - a1 a2^dag) )
-    generator = theta * (a1.dag() * a2 - a1 * a2.dag())
-    U_bs = generator.expm()
+    # 3. Prepare Permutation
+    #    Identify indices that are NOT the beam splitter modes
+    other_indices = [i for i in range(num_subsystems) if i != idx1 and i != idx2]
+    
+    #    Calculate the dimension of the "rest" of the system
+    dim_rest = 1
+    for idx in other_indices:
+        dim_rest *= dims[idx]
+        
+    #    Order: [Rest of System] followed by [Mode 1, Mode 2]
+    perm_order = other_indices + [idx1, idx2]
+    
+    #    Inverse permutation to restore order later
+    inv_perm_order = np.argsort(perm_order).tolist()
 
-    # 6. Apply and return
+    # 4. Permute the Input State
+    state_permuted = input_state.permute(perm_order)
+
+    # 5. Construct the Global Unitary
+    #    We create (Identity_Rest) ⊗ (U_local)
+    #    Initially, this has dims [[dim_rest, N1, N2], [dim_rest, N1, N2]]
+    #    We must FIX the dims to match the individual qubits of state_permuted
+    U_global_ordered = qt.tensor(qt.qeye(dim_rest), U_local)
+    
+    #    CRITICAL FIX: Force the unitary to have the detailed [2, 2, ..., 4, 4] structure
+    #    so QuTiP allows the multiplication.
+    target_dims = state_permuted.dims[0]
+    U_global_ordered.dims = [target_dims, target_dims]
+
+    # 6. Apply Unitary
     if input_state.isket:
-        return U_bs * input_state
+        result_permuted = U_global_ordered * state_permuted
     else:
-        return U_bs * input_state * U_bs.dag()
+        result_permuted = U_global_ordered * state_permuted * U_global_ordered.dag()
+
+    # 7. Restore original order
+    return result_permuted.permute(inv_perm_order)
+
 
 def apply_hadamard(state: qt.Qobj, target_idx: int) -> qt.Qobj:
     dims = state.dims[0]
@@ -187,7 +206,6 @@ def apply_swap(state: qt.Qobj, idx1: int, idx2: int) -> qt.Qobj:
     state = apply_cnot(state, idx1, idx2)
     return state
 
-
 def apply_toffoli(state: qt.Qobj, ctrl1: int, ctrl2: int, target: int) -> qt.Qobj:
     dims = state.dims[0]
     # Identity on all subsystems
@@ -214,6 +232,7 @@ def apply_toffoli(state: qt.Qobj, ctrl1: int, ctrl2: int, target: int) -> qt.Qob
         return U_toffoli * state
     else:
         return U_toffoli * state * U_toffoli.dag()
+
 
 
 def swap_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
@@ -252,20 +271,103 @@ def repetition_decode(state: qt.Qobj, target_index: int, source_index_list: list
     
     return state
 
+def shor_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
+    if len(target_index_list) != 9:
+        raise ValueError("Shor code requires exactly 9 channel qubits")
+
+    # 1. Move logical state into the first qubit of the block (q0)
+    q0 = target_index_list[0]
+    state = apply_swap(state, source_index, q0)
+
+    # Indices for clarity
+    q = target_index_list # q[0]...q[8]
+
+    # 2. Phase-flip protection encoding (Repetition in Z basis)
+    # CNOT logical qubit to leaders of block 2 (q3) and block 3 (q6)
+    state = apply_cnot(state, q[0], q[3])
+    state = apply_cnot(state, q[0], q[6])
+
+    # 3. Hadamard on leaders (basis change for inner bit-flip codes)
+    state = apply_hadamard(state, q[0])
+    state = apply_hadamard(state, q[3])
+    state = apply_hadamard(state, q[6])
+
+    # 4. Bit-flip protection encoding (Repetition in X basis for each block)
+    # Block 1
+    state = apply_cnot(state, q[0], q[1])
+    state = apply_cnot(state, q[0], q[2])
+    # Block 2
+    state = apply_cnot(state, q[3], q[4])
+    state = apply_cnot(state, q[3], q[5])
+    # Block 3
+    state = apply_cnot(state, q[6], q[7])
+    state = apply_cnot(state, q[6], q[8])
+
+    return state
+
+def shor_decode(state: qt.Qobj, target_index: int, source_index_list: list[int]) -> qt.Qobj:
+    if len(source_index_list) != 9:
+        raise ValueError("Shor code requires exactly 9 channel qubits")
+    
+    q = source_index_list
+
+    # --- Level 1: Bit-flip correction (inner layer) ---
+    
+    # Block 1 (q0, q1, q2) - Correct q0
+    state = apply_cnot(state, q[0], q[1])
+    state = apply_cnot(state, q[0], q[2])
+    state = apply_toffoli(state, q[1], q[2], q[0])
+
+    # Block 2 (q3, q4, q5) - Correct q3
+    state = apply_cnot(state, q[3], q[4])
+    state = apply_cnot(state, q[3], q[5])
+    state = apply_toffoli(state, q[4], q[5], q[3])
+
+    # Block 3 (q6, q7, q8) - Correct q6
+    state = apply_cnot(state, q[6], q[7])
+    state = apply_cnot(state, q[6], q[8])
+    state = apply_toffoli(state, q[7], q[8], q[6])
+
+    # --- Level 2: Phase-flip correction (outer layer) ---
+
+    # Basis change back to computational
+    state = apply_hadamard(state, q[0])
+    state = apply_hadamard(state, q[3])
+    state = apply_hadamard(state, q[6])
+
+    # Correct phase flip on q0 using q3 and q6
+    state = apply_cnot(state, q[0], q[3])
+    state = apply_cnot(state, q[0], q[6])
+    state = apply_toffoli(state, q[3], q[6], q[0])
+
+    # --- Level 3: Transfer to RX edge ---
+    state = apply_swap(state, q[0], target_index)
+
+    return state
+
+
+
 
 class EncodingType(Enum):
-    NO_ENCODING = 1
+    SWAP_DUMMY_ENCODING = 1
     REPETITION_3_QUBITS = 2
+    SHOR_9_QUBITS = 3
+
 def generic_encode(state: qt.Qobj, source_index: int, target_index_list: list[int], encoding: EncodingType) -> qt.Qobj:
-    if(encoding is EncodingType.NO_ENCODING):
+    if encoding is EncodingType.SWAP_DUMMY_ENCODING:
         return swap_encode(state, source_index, target_index_list)
-    if(encoding is EncodingType.REPETITION_3_QUBITS):
+    if encoding is EncodingType.REPETITION_3_QUBITS:
         return repetition_encode(state, source_index, target_index_list)
+    if encoding is EncodingType.SHOR_9_QUBITS:
+        return shor_encode(state, source_index, target_index_list)
+
 def generic_decode(state: qt.Qobj, target_index: int, source_index_list: list[int], encoding: EncodingType) -> qt.Qobj:
-    if(encoding is EncodingType.NO_ENCODING):
+    if encoding is EncodingType.SWAP_DUMMY_ENCODING:
         return swap_decode(state, target_index, source_index_list)
-    if(encoding is EncodingType.REPETITION_3_QUBITS):
+    if encoding is EncodingType.REPETITION_3_QUBITS:
         return repetition_decode(state, target_index, source_index_list)
+    if encoding is EncodingType.SHOR_9_QUBITS:
+        return shor_decode(state, target_index, source_index_list)
 
 
 ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
@@ -275,11 +377,11 @@ ideal_rho = qt.ket2dm(ideal_phi_plus)
 
 
 
-N = 20
-vertical_displacement = 2
-loss_prob = 0.2
-NUM_CHANNEL_QUBITS = 3
-encoding_type = EncodingType.REPETITION_3_QUBITS
+N = 18
+vertical_displacement = 1.5
+loss_prob = 0.01
+NUM_CHANNEL_QUBITS = 9
+encoding_type = EncodingType.SHOR_9_QUBITS
 
 
 state_index_dict = {}
@@ -322,25 +424,26 @@ for i in range(NUM_CHANNEL_QUBITS):
     add_subsystem(2, f"channel_{i}_tx")
 
 #all_states = apply_swap(all_states, state_index_dict["tx_temp"], state_index_dict[f"channel_{0}_tx"])
-all_states = generic_encode(all_states, state_index_dict["tx_temp"], [state_index_dict[f"channel_{0}_tx"], state_index_dict[f"channel_{1}_tx"], state_index_dict[f"channel_{2}_tx"]], encoding_type)
+all_states = generic_encode(all_states, state_index_dict["tx_temp"], [state_index_dict[f"channel_{i}_tx"] for i in range(NUM_CHANNEL_QUBITS)], encoding_type)
 
 ptrace_subsystem("tx_temp")
 
 for i in range(NUM_CHANNEL_QUBITS):
+    print(f"channel {i}")
     add_subsystem(N, f"channel_{i}_cat")
     all_states = apply_cat_state_encoding(all_states, state_index_dict[f"channel_{i}_tx"], state_index_dict[f"channel_{i}_cat"], vertical_displacement, N)
     ptrace_subsystem(f"channel_{i}_tx")
     add_subsystem(N, f"channel_{i}_vacuum")
     all_states = beamsplitter_general(all_states, state_index_dict[f"channel_{i}_cat"], state_index_dict[f"channel_{i}_vacuum"], loss_prob)
+    ptrace_subsystem(f"channel_{i}_vacuum")
     add_subsystem(2, f"channel_{i}_rx")
     all_states = apply_ideal_cat_state_decoding(all_states, state_index_dict[f"channel_{i}_rx"], state_index_dict[f"channel_{i}_cat"], vertical_displacement, N)
     ptrace_subsystem(f"channel_{i}_cat")
-    ptrace_subsystem(f"channel_{i}_vacuum")
 
 add_subsystem(2, "rx_edge")
 
 #all_states = apply_swap(all_states, state_index_dict[f"channel_{0}_rx"], state_index_dict["rx_edge"])
-all_states = generic_decode(all_states, state_index_dict["rx_edge"], [state_index_dict[f"channel_{0}_rx"], state_index_dict[f"channel_{1}_rx"], state_index_dict[f"channel_{2}_rx"]], encoding_type)
+all_states = generic_decode(all_states, state_index_dict["rx_edge"], [state_index_dict[f"channel_{i}_rx"] for i in range(NUM_CHANNEL_QUBITS)], encoding_type)
 
 for i in range(NUM_CHANNEL_QUBITS):
     ptrace_subsystem(f"channel_{i}_rx")
