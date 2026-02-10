@@ -4,7 +4,6 @@ from typing import Self, cast
 import matplotlib.pyplot as plt
 import numpy as np
 from IPython.display import Image
-from math import *
 import qutip as qt
 import qutip.qip
 from enum import Enum
@@ -318,6 +317,41 @@ def apply_swap(sm: StateManager, key1: str, key2: str):
     apply_cnot(sm, key2, key1)
     apply_cnot(sm, key1, key2)
 
+def apply_toffoli(sm: StateManager, ctrl1_key: str, ctrl2_key: str, target_key: str):
+    sm.ensure_same_system(ctrl1_key, ctrl2_key)
+    sm.ensure_same_system(ctrl1_key, target_key)
+
+    system_index, ctrl1 = sm.state_index_dict[ctrl1_key]
+    _, ctrl2 = sm.state_index_dict[ctrl2_key]
+    _, target = sm.state_index_dict[target_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+
+    # Identity on all subsystems
+    op_list_id = [qt.qeye(d) for d in dims]
+    
+    # The Toffoli gate: I + |11><11| ⊗ (X - I)
+    # This only acts when both controls are in the |1> state
+    proj_11 = [qt.qeye(d) for d in dims]
+    proj_11[ctrl1] = qt.basis(2, 1).proj()
+    proj_11[ctrl2] = qt.basis(2, 1).proj()
+    
+    # The operator (X - I) on the target
+    op_x_minus_i = [qt.qeye(d) for d in dims]
+    op_x_minus_i[target] = qt.sigmax() - qt.qeye(2)
+    
+    # Combine: U = Identity + (Projector_11 * Target_Flip_Logic)
+    # We use element-wise multiplication of the lists to build the tensor components
+    U_toffoli = qt.tensor(*op_list_id) + (qt.tensor(*proj_11) @ qt.tensor(*op_list_id).dag() @ qt.tensor(*op_x_minus_i))
+    
+    # Faster/Cleaner alternative for U_toffoli if dimensions are standard:
+    # U_toffoli = qt.tensor(op_list_id) + qt.tensor([qt.basis(2,1).proj() if i == ctrl1 or i == ctrl2 else (qt.sigmax()-qt.qeye(2)) if i == target else qt.qeye(d) for i, d in enumerate(dims)])
+
+    if system.isket:
+        sm.systems_list[system_index] = U_toffoli @ system
+    else:
+        sm.systems_list[system_index] = U_toffoli @ system @ U_toffoli.dag()
 
 
 
@@ -327,18 +361,56 @@ def swap_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
 def swap_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
     apply_swap(sm, source_key_list[0], target_key)
 
+def repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
+    apply_swap(sm, source_key, target_key_list[0])
+    for i in range(1, len(target_key_list)):
+        target_key = target_key_list[i]
+        apply_cnot(sm, target_key_list[0], target_key)
+
+def repetition_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    for i in range(1, len(source_key_list)):
+        apply_cnot(sm, source_key_list[0], source_key_list[i])
+    if len(source_key_list) == 3:
+        apply_toffoli(sm, source_key_list[1], source_key_list[2], source_key_list[0])
+    else:
+        print("unsupported decoding for n != 3")
+        exit()
+    apply_swap(sm, source_key_list[0], target_key)
+
+def phase_repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
+    apply_hadamard(sm, source_key)
+    repetition_encode(sm, source_key, target_key_list)
+    for idx in target_key_list:
+        apply_hadamard(sm, idx)
+
+def phase_repetition_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    for idx in source_key_list:
+        apply_hadamard(sm, idx)
+    repetition_decode(sm, target_key, source_key_list)
+    apply_hadamard(sm, target_key)
 
 
 class EncodingType(Enum):
     SWAP_DUMMY_ENCODING = 1
+    REPETITION_BIT_FLIP = 2
+    REPETITION_PHASE_FLIP = 3
+    SHOR_9_QUBITS = 4
 
 def generic_encode(sm: StateManager, source_key: str, target_key_list: list[str], encoding: EncodingType):
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
         swap_encode(sm, source_key, target_key_list)
+    elif encoding is EncodingType.REPETITION_BIT_FLIP:
+        repetition_encode(sm, source_key, target_key_list)
+    elif encoding is EncodingType.REPETITION_PHASE_FLIP:
+        phase_repetition_encode(sm, source_key, target_key_list)
 
 def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str], encoding: EncodingType):
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
         swap_decode(sm, target_key, source_key_list)
+    elif encoding is EncodingType.REPETITION_BIT_FLIP:
+        repetition_decode(sm, target_key, source_key_list)
+    elif encoding is EncodingType.REPETITION_PHASE_FLIP:
+        phase_repetition_decode(sm, target_key, source_key_list)
 
 
 ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
@@ -353,70 +425,22 @@ ideal_rho = qt.ket2dm(ideal_phi_plus)
 def run_fidelity_simulation(N: int, vertical_displacement: float, loss_prob: float, NUM_CHANNEL_QUBITS: int, encoding_type: EncodingType) -> float:
     sm = StateManager()
 
-    # all_states = qt.ket2dm(qt.tensor([qt.basis(2,0)]*num_tx_qubits + initial_channel_states*NUM_CHANNEL_QUBITS + [qt.basis(2,0)]*num_rx_qubits))
     sm.add_subsystem(2, "tx_edge")
     sm.add_subsystem(2, "tx_temp")
-
-    print("tx side initial")
-    sm.print_dimensions()
-
     apply_hadamard(sm, "tx_edge")
     apply_cnot(sm, "tx_edge", "tx_temp")
-
-    print("tx side entangled")
-    sm.print_dimensions()
-
     for i in range(NUM_CHANNEL_QUBITS):
         sm.add_subsystem(2, f"channel_{i}_tx")
-
-    print("tx side qubits")
-    sm.print_dimensions()
-
     generic_encode(sm, "tx_temp", [f"channel_{i}_tx" for i in range(NUM_CHANNEL_QUBITS)], encoding_type)
-
-    print("tx side encoded")
-    sm.print_dimensions()
-
     sm.ptrace_subsystem("tx_temp")
-
-    print("tx side trimmed")
-    sm.print_dimensions()
-
     for i in range(NUM_CHANNEL_QUBITS):
         sm.add_subsystem(N, f"channel_{i}_cat")
-
-        print("cat added")
-        sm.print_dimensions()
-
         apply_cat_state_encoding(sm, f"channel_{i}_tx", f"channel_{i}_cat", vertical_displacement, N)
-
-        print("cat encoding")
-        sm.print_dimensions()
-
         sm.ptrace_subsystem(f"channel_{i}_tx")
-
-        print("tx qubit removed")
-        sm.print_dimensions()
-
         apply_direct_loss(sm, f"channel_{i}_cat", loss_prob)
-
-        print("after transmission")
-        sm.print_dimensions()
-
         sm.add_subsystem(2, f"channel_{i}_rx")
-
-        print("rx added")
-        sm.print_dimensions()
-
         apply_ideal_cat_state_decoding(sm, f"channel_{i}_rx", f"channel_{i}_cat", vertical_displacement, N)
-
-        print("cat decoding")
-        sm.print_dimensions()
-
         sm.ptrace_subsystem(f"channel_{i}_cat")
-
-        print("cat removed")
-        sm.print_dimensions()
 
     sm.add_subsystem(2, "rx_edge")
 
@@ -438,18 +462,21 @@ vertical_displacement = 1.5
 
 loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.75), num=6)
 
-res_swap_1_list = []
-res_swap_2_list = []
+res_swap_list = []
+res_bit_repetition_list = []
+res_phase_repetition_list = []
 
 for loss_prob in loss_prob_list:
     print(f"loss_prob {loss_prob}")
-    res_swap_1_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=1, encoding_type=EncodingType.SWAP_DUMMY_ENCODING)]
-    res_swap_2_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=2, encoding_type=EncodingType.SWAP_DUMMY_ENCODING)]
+    res_swap_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=1, encoding_type=EncodingType.SWAP_DUMMY_ENCODING)]
+    res_bit_repetition_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_BIT_FLIP)]
+    res_phase_repetition_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_PHASE_FLIP)]
 
 
 # Add 'label' to each plot, and markers (o, s, ^) to distinguish points
-plt.loglog(loss_prob_list, res_swap_1_list,    '^-', label='No Encoding (1 qubit)')
-#plt.loglog(loss_prob_list, res_swap_2_list,    '^-', label='No Encoding (2 qubit)')
+plt.loglog(loss_prob_list, res_swap_list,    '^-', label='No Encoding (1 qubit)')
+plt.loglog(loss_prob_list, res_bit_repetition_list, 's-', label='Bit Flip Repetition Code (3 qubits)')
+plt.loglog(loss_prob_list, res_phase_repetition_list, 's-', label='Phase Flip Repetition Code (3 qubits)')
 
 # Add axis labels and title
 plt.xlabel('Loss Probability')
