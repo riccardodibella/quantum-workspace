@@ -360,6 +360,9 @@ def apply_cnot(sm: StateManager, control_key: str, target_key: str):
         sm.systems_list[system_index] = CNOT_total @ system @ CNOT_total.dag()
     
 def apply_swap(sm: StateManager, key1: str, key2: str):
+    if(key1 == key2):
+        return
+    
     # A SWAP is 3 CNOTs
     apply_cnot(sm, key1, key2)
     apply_cnot(sm, key2, key1)
@@ -441,47 +444,72 @@ def shor_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
     if len(target_key_list) != 9:
         raise ValueError("Shor code requires exactly 9 channel qubits")
 
-    q0 = target_key_list[0]
-    apply_swap(sm, source_key, q0)
-
     q = target_key_list
 
-    apply_cnot(sm, q[0], q[3])
-    apply_cnot(sm, q[0], q[6])
-    apply_hadamard(sm, q[0])
-    apply_hadamard(sm, q[3])
-    apply_hadamard(sm, q[6])
-    apply_cnot(sm, q[0], q[1])
-    apply_cnot(sm, q[0], q[2])
-    apply_cnot(sm, q[3], q[4])
-    apply_cnot(sm, q[3], q[5])
-    apply_cnot(sm, q[6], q[7])
-    apply_cnot(sm, q[6], q[8])
+    # Phase repetition on the first qubit into q[0], q[3], q[6]
+    phase_repetition_encode(sm, source_key, [q[0], q[3], q[6]])
+
+    # Bit repetition on each block
+    repetition_encode(sm, q[0], [q[0], q[1], q[2]])
+    repetition_encode(sm, q[3], [q[3], q[4], q[5]])
+    repetition_encode(sm, q[6], [q[6], q[7], q[8]])
+
 
 
 def shor_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
     if len(source_key_list) != 9:
         raise ValueError("Shor code requires exactly 9 channel qubits")
-    
-    q = source_key_list
-    
-    apply_cnot(sm, q[0], q[1])
-    apply_cnot(sm, q[0], q[2])
-    apply_toffoli(sm, q[1], q[2], q[0])
-    apply_cnot(sm, q[3], q[4])
-    apply_cnot(sm, q[3], q[5])
-    apply_toffoli(sm, q[4], q[5], q[3])
-    apply_cnot(sm, q[6], q[7])
-    apply_cnot(sm, q[6], q[8])
-    apply_toffoli(sm, q[7], q[8], q[6])
-    apply_hadamard(sm, q[0])
-    apply_hadamard(sm, q[3])
-    apply_hadamard(sm, q[6])
-    apply_cnot(sm, q[0], q[3])
-    apply_cnot(sm, q[0], q[6])
-    apply_toffoli(sm, q[3], q[6], q[0])
 
-    apply_swap(sm, q[0], target_key)
+    q = source_key_list
+
+    # Decode bit-flip repetition in each block
+    repetition_decode(sm, q[0], [q[0], q[1], q[2]])
+    repetition_decode(sm, q[3], [q[3], q[4], q[5]])
+    repetition_decode(sm, q[6], [q[6], q[7], q[8]])
+
+    # Decode phase repetition across the blocks
+    phase_repetition_decode(sm, target_key, [q[0], q[3], q[6]])
+
+def wrap_repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
+    if len(target_key_list) != 9:
+        raise ValueError("wrap_repetition code requires exactly 9 channel qubits")
+
+    q = target_key_list
+
+    # Phase repetition on the first qubit into q[0], q[3], q[6]
+    repetition_encode(sm, source_key, [q[0], q[3], q[6]])
+
+    # Bit repetition on each block
+    repetition_encode(sm, q[0], [q[0], q[1], q[2]])
+    repetition_encode(sm, q[3], [q[3], q[4], q[5]])
+    repetition_encode(sm, q[6], [q[6], q[7], q[8]])
+
+def wrap_repetition_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    if len(source_key_list) != 9:
+        raise ValueError("wrap_repetition code requires exactly 9 channel qubits")
+
+    q = source_key_list
+
+    # Decode bit-flip repetition in each block
+    repetition_decode(sm, q[0], [q[0], q[1], q[2]])
+    repetition_decode(sm, q[3], [q[3], q[4], q[5]])
+    repetition_decode(sm, q[6], [q[6], q[7], q[8]])
+
+    # Decode phase repetition across the blocks
+    repetition_decode(sm, target_key, [q[0], q[3], q[6]])
+
+def phase_wrap_repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
+    apply_hadamard(sm, source_key)
+    wrap_repetition_encode(sm, source_key, target_key_list)
+    for idx in target_key_list:
+        apply_hadamard(sm, idx)
+
+def phase_wrap_repetition_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    for idx in source_key_list:
+        apply_hadamard(sm, idx)
+    wrap_repetition_decode(sm, target_key, source_key_list)
+    apply_hadamard(sm, target_key)
+
 
 
 
@@ -499,6 +527,8 @@ class EncodingType(Enum):
     REPETITION_BIT_FLIP = 2
     REPETITION_PHASE_FLIP = 3
     SHOR_9_QUBITS = 4
+    REPETITION_BIT_FLIP_WRAP = 5
+    REPETITION_PHASE_FLIP_WRAP = 6
 
 def generic_encode(sm: StateManager, source_key: str, target_key_list: list[str], encoding: EncodingType):
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
@@ -509,6 +539,10 @@ def generic_encode(sm: StateManager, source_key: str, target_key_list: list[str]
         phase_repetition_encode(sm, source_key, target_key_list)
     elif encoding is EncodingType.SHOR_9_QUBITS:
         shor_encode(sm, source_key, target_key_list)
+    elif encoding is EncodingType.REPETITION_BIT_FLIP_WRAP:
+        wrap_repetition_encode(sm, source_key, target_key_list)
+    elif encoding is EncodingType.REPETITION_PHASE_FLIP_WRAP:
+        phase_wrap_repetition_encode(sm, source_key, target_key_list)
 
 def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str], encoding: EncodingType):
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
@@ -519,6 +553,10 @@ def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str]
         phase_repetition_decode(sm, target_key, source_key_list)
     elif encoding is EncodingType.SHOR_9_QUBITS:
         shor_decode(sm, target_key, source_key_list)
+    elif encoding is EncodingType.REPETITION_BIT_FLIP_WRAP:
+        wrap_repetition_decode(sm, target_key, source_key_list)
+    elif encoding is EncodingType.REPETITION_PHASE_FLIP_WRAP:
+        phase_wrap_repetition_decode(sm, target_key, source_key_list)
 
 
 ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
@@ -546,7 +584,6 @@ def run_fidelity_simulation(N: int, vertical_displacement: float, loss_prob: flo
     sm.ptrace_subsystem("tx_temp")
 
     for i in range(NUM_CHANNEL_QUBITS):
-        print(f"{encoding_type.value} {i}")
         sm.add_subsystem(N, f"channel_{i}_cat")
         apply_cat_state_encoding(sm, f"channel_{i}_tx", f"channel_{i}_cat", vertical_displacement, N)
         sm.ptrace_subsystem(f"channel_{i}_tx")
@@ -570,7 +607,7 @@ def run_fidelity_simulation(N: int, vertical_displacement: float, loss_prob: flo
 
 
 
-N = 8
+N = 18
 vertical_displacement = 1.5
 
 
@@ -580,6 +617,8 @@ res_swap_list = []
 res_bit_repetition_list = []
 res_phase_repetition_list = []
 res_shor_list = []
+res_bit_wrap_list = []
+res_phase_wrap_list = []
 
 for loss_prob in loss_prob_list:
     print(f"loss_prob {loss_prob}")
@@ -587,12 +626,16 @@ for loss_prob in loss_prob_list:
     res_bit_repetition_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_BIT_FLIP)]
     res_phase_repetition_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_PHASE_FLIP)]
     res_shor_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=9, encoding_type=EncodingType.SHOR_9_QUBITS)]
+    res_bit_wrap_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=9, encoding_type=EncodingType.REPETITION_BIT_FLIP_WRAP)]
 
 
 plt.loglog(loss_prob_list, res_swap_list, label='No Encoding (1 qubit)')
 plt.loglog(loss_prob_list, res_bit_repetition_list, label='Bit Flip Repetition Code (3 qubits)')
 plt.loglog(loss_prob_list, res_phase_repetition_list, label='Phase Flip Repetition Code (3 qubits)')
 plt.loglog(loss_prob_list, res_shor_list, label='Shor Code (9 qubits)')
+plt.loglog(loss_prob_list, res_bit_wrap_list, label='Bit Flip Wrap Code (9 qubits)')
+
+
 
 # Add axis labels and title
 plt.xlabel('Loss Probability')
