@@ -7,7 +7,7 @@ from IPython.display import Image
 import qutip as qt
 import qutip.qip
 from enum import Enum
-from math import *
+from math import factorial
 
 # set a parameter to see animations in line
 from matplotlib import rc
