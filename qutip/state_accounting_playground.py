@@ -7,6 +7,7 @@ from IPython.display import Image
 import qutip as qt
 import qutip.qip
 from enum import Enum
+from math import *
 
 # set a parameter to see animations in line
 from matplotlib import rc
@@ -268,6 +269,53 @@ def apply_direct_loss(sm: StateManager, key: str, loss_prob: float):
     # 4. Update the manager with the resulting density matrix
     sm.systems_list[system_index] = result.states[-1]
 
+def apply_kraus_loss(
+    sm: StateManager,
+    key: str,
+    loss_prob: float,
+    k_max: int | None = None
+):
+    system_index, local_idx = sm.state_index_dict[key]
+    system = sm.systems_list[system_index]
+
+    # Ensure density matrix
+    if system.isket:
+        system = qt.ket2dm(system)
+
+    dims = system.dims[0]
+    N = dims[local_idx]
+    assert isinstance(N, int)
+
+    eta = 1.0 - loss_prob
+    if k_max is None:
+        k_max = N - 1
+
+    # Single-mode operators
+    a = qt.destroy(N)
+    n = a.dag() @ a
+
+    # THIS is the key fix
+    eta_n: qt.Qobj = (0.5 * np.log(eta) * n).expm()
+
+    id_ops = [qt.qeye(d) for d in dims]
+    rho_out = 0 * system
+
+    for k in range(k_max + 1):
+        Ak_local = (
+            ((1 - eta) ** (k / 2))
+            / np.sqrt(factorial(k))
+            * eta_n
+            * (a ** k)
+        )
+
+        op_list = id_ops.copy()
+        op_list[local_idx] = Ak_local
+        K = qt.tensor(*op_list)
+
+        rho_out += K @ system @ K.dag()
+
+    sm.systems_list[system_index] = rho_out
+
 
 def apply_hadamard(sm: StateManager, target_key: str):
     system_index, target_idx = sm.state_index_dict[target_key]
@@ -502,7 +550,8 @@ def run_fidelity_simulation(N: int, vertical_displacement: float, loss_prob: flo
         sm.add_subsystem(N, f"channel_{i}_cat")
         apply_cat_state_encoding(sm, f"channel_{i}_tx", f"channel_{i}_cat", vertical_displacement, N)
         sm.ptrace_subsystem(f"channel_{i}_tx")
-        apply_direct_loss(sm, f"channel_{i}_cat", loss_prob)
+        # apply_direct_loss(sm, f"channel_{i}_cat", loss_prob)
+        apply_kraus_loss(sm, f"channel_{i}_cat", loss_prob)
         sm.add_subsystem(2, f"channel_{i}_rx")
         apply_ideal_cat_state_decoding(sm, f"channel_{i}_rx", f"channel_{i}_cat", vertical_displacement, N)
         sm.ptrace_subsystem(f"channel_{i}_cat")
