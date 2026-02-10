@@ -349,130 +349,6 @@ def shor_decode(state: qt.Qobj, target_index: int, source_index_list: list[int])
 
     return state
 
-def steane_encode(state: qt.Qobj, source_index: int, target_index_list: list[int]) -> qt.Qobj:
-    if len(target_index_list) != 7:
-        raise ValueError("Steane code requires exactly 7 channel qubits")
-
-    q = target_index_list
-
-    # Move logical qubit into q0
-    state = apply_swap(state, source_index, q[0])
-
-    # --- Z-type encoding (classical Hamming code) ---
-    state = apply_cnot(state, q[0], q[3])
-    state = apply_cnot(state, q[0], q[5])
-    state = apply_cnot(state, q[0], q[6])
-
-    state = apply_cnot(state, q[1], q[3])
-    state = apply_cnot(state, q[1], q[4])
-    state = apply_cnot(state, q[1], q[6])
-
-    state = apply_cnot(state, q[2], q[3])
-    state = apply_cnot(state, q[2], q[4])
-    state = apply_cnot(state, q[2], q[5])
-
-    # --- X-type encoding (CSS symmetry) ---
-    for i in range(7):
-        state = apply_hadamard(state, q[i])
-
-    state = apply_cnot(state, q[0], q[3])
-    state = apply_cnot(state, q[0], q[5])
-    state = apply_cnot(state, q[0], q[6])
-
-    state = apply_cnot(state, q[1], q[3])
-    state = apply_cnot(state, q[1], q[4])
-    state = apply_cnot(state, q[1], q[6])
-
-    state = apply_cnot(state, q[2], q[3])
-    state = apply_cnot(state, q[2], q[4])
-    state = apply_cnot(state, q[2], q[5])
-
-    for i in range(7):
-        state = apply_hadamard(state, q[i])
-
-    return state
-
-def pauli(op, i, dims):
-    ops = [qt.qeye(2) for _ in dims]
-    ops[i] = op
-    return qt.tensor(ops)
-
-def steane_projectors(dims):
-    Z = qt.sigmaz()
-    X = qt.sigmax()
-    I = qt.qeye(2)
-
-    stabilizers = [
-        qt.tensor([Z,Z,Z,Z,I,I,I]),
-        qt.tensor([Z,Z,I,I,Z,Z,I]),
-        qt.tensor([Z,I,Z,I,Z,I,Z]),
-        qt.tensor([X,X,X,X,I,I,I]),
-        qt.tensor([X,X,I,I,X,X,I]),
-        qt.tensor([X,I,X,I,X,I,X]),
-    ]
-
-    projectors = []
-    for s in range(2**6):
-        P = qt.tensor([qt.qeye(2)] * 7)
-        for i, S in enumerate(stabilizers):
-            bit = (s >> i) & 1
-            P = P * (qt.qeye(P.dims[0]) + ((-1)**bit) * S) / 2
-        projectors.append(P)
-
-    return projectors
-
-
-def steane_correction(syndrome, dims):
-    X = qt.sigmax()
-    Z = qt.sigmaz()
-    I = qt.qeye(2)
-
-    # Minimum-weight lookup table
-    # syndrome : (pauli, qubit_index)
-    lookup = {
-        0b000001: ('Z', 0),
-        0b000010: ('Z', 1),
-        0b000100: ('Z', 2),
-        0b001000: ('Z', 3),
-        0b010000: ('Z', 4),
-        0b100000: ('Z', 5),
-        # X syndromes (example subset)
-        0b000111: ('X', 0),
-        0b001011: ('X', 1),
-        0b010011: ('X', 2),
-    }
-
-    if syndrome not in lookup:
-        return qt.tensor([I]*7)
-
-    pauli_type, q = lookup[syndrome]
-    ops = [I]*7
-    ops[q] = X if pauli_type == 'X' else Z
-    return qt.tensor(ops)
-
-
-def steane_decode(state: qt.Qobj, target_index: int, source_index_list: list[int]) -> qt.Qobj:
-    if len(source_index_list) != 7:
-        raise ValueError("Steane code requires exactly 7 qubits")
-
-    q = source_index_list
-    dims = state.dims[0]
-
-    projectors = steane_projectors(dims)
-
-    rho = state if not state.isket else qt.ket2dm(state)
-    rho_out = 0 * rho
-
-    for s, P in enumerate(projectors):
-        C = steane_correction(s, dims)
-        rho_out += C * P * rho * P * C.dag()
-
-    # Extract logical qubit
-    rho_out = apply_swap(rho_out, q[0], target_index)
-
-    return rho_out
-
-
 
 
 class EncodingType(Enum):
@@ -480,7 +356,6 @@ class EncodingType(Enum):
     REPETITION_BIT_FLIP = 2
     REPETITION_PHASE_FLIP = 3
     SHOR_9_QUBITS = 4
-    STEANE_7_QUBITS = 5
 
 def generic_encode(state: qt.Qobj, source_index: int, target_index_list: list[int], encoding: EncodingType) -> qt.Qobj:
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
@@ -491,8 +366,6 @@ def generic_encode(state: qt.Qobj, source_index: int, target_index_list: list[in
         return phase_repetition_encode(state, source_index, target_index_list)
     if encoding is EncodingType.SHOR_9_QUBITS:
         return shor_encode(state, source_index, target_index_list)
-    if encoding is EncodingType.STEANE_7_QUBITS:
-        return steane_encode(state, source_index, target_index_list)
 
 def generic_decode(state: qt.Qobj, target_index: int, source_index_list: list[int], encoding: EncodingType) -> qt.Qobj:
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
@@ -503,8 +376,6 @@ def generic_decode(state: qt.Qobj, target_index: int, source_index_list: list[in
         return phase_repetition_decode(state, target_index, source_index_list)
     if encoding is EncodingType.SHOR_9_QUBITS:
         return shor_decode(state, target_index, source_index_list)
-    if encoding is EncodingType.STEANE_7_QUBITS:
-        return steane_decode(state, target_index, source_index_list)
 
 
 ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
@@ -597,10 +468,9 @@ N = 18
 vertical_displacement = 1.5
 
 
-loss_prob_list = np.logspace(np.log10(0.75), np.log10(0.001), num=10)
+loss_prob_list = np.logspace(np.log10(0.75), np.log10(0.01), num=6)
 
 res_shor_list = []
-res_steane_list = []
 res_bit_repetition_list = []
 res_phase_repetition_list = []
 res_swap_list = []
@@ -608,7 +478,6 @@ res_swap_list = []
 for loss_prob in loss_prob_list:
     print(f"{loss_prob}")
     res_shor_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=9, encoding_type=EncodingType.SHOR_9_QUBITS)]
-    res_steane_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=7, encoding_type=EncodingType.STEANE_7_QUBITS)]
     res_bit_repetition_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_BIT_FLIP)]
     res_phase_repetition_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_PHASE_FLIP)]
     res_swap_list += [run_fidelity_simulation(N, vertical_displacement, loss_prob, NUM_CHANNEL_QUBITS=1, encoding_type=EncodingType.SWAP_DUMMY_ENCODING)]
@@ -616,7 +485,6 @@ for loss_prob in loss_prob_list:
 
 # Add 'label' to each plot, and markers (o, s, ^) to distinguish points
 plt.loglog(loss_prob_list, res_shor_list,    'o-', label='Shor Code (9 qubits)')
-plt.loglog(loss_prob_list, res_steane_list,    'o-', label='Steane Code (7 qubits)')
 plt.loglog(loss_prob_list, res_bit_repetition_list, 's-', label='Bit Flip Repetition Code (3 qubits)')
 plt.loglog(loss_prob_list, res_phase_repetition_list, 's-', label='Phase Flip Repetition Code (3 qubits)')
 plt.loglog(loss_prob_list, res_swap_list,    '^-', label='No Encoding (1 qubit)')
