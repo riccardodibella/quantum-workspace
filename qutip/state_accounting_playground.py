@@ -303,7 +303,7 @@ def apply_kraus_loss(
     for k in range(k_max + 1):
         Ak_local = (
             ((1 - eta) ** (k / 2))
-            / np.sqrt(factorial(k))
+            / np.sqrt(float(factorial(k)))
             * eta_n
             * (a ** k)
         )
@@ -607,8 +607,8 @@ def run_fidelity_simulation(N: int, vertical_displacement: float, loss_prob: flo
 
 
 
-N = 18
-vertical_displacement = 1.5
+N = 40
+vertical_displacement = 2.5
 
 
 loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.75), num=6)
