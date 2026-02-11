@@ -327,6 +327,104 @@ def apply_ideal_cat_state_decoding(sm: StateManager, qubit_key: str, cv_key: str
     else:
         sm.systems_list[system_index] = U_total @ system @ U_total.dag()
 
+def apply_kitten_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    system_index, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+
+    logical_zero = (qt.basis(N, 0) + qt.basis(N, 4)).unit()
+    logical_one = qt.basis(N, 2)
+
+    map_zero = logical_zero @ qt.basis(N, 0).dag()
+    map_one  = logical_one @ qt.basis(N, 0).dag()
+
+    op0 = [qt.qeye(d) for d in dims]
+    op0[qubit_pos] = qt.basis(2, 0).proj()
+    op0[cv_pos] = map_zero
+
+    op1 = [qt.qeye(d) for d in dims]
+    op1[qubit_pos] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
+    op1[cv_pos] = map_one
+
+    U_encode = qt.tensor(*op0) + qt.tensor(*op1)
+    
+    if system.isket:
+        sm.systems_list[system_index] = U_encode @ system
+    else:
+        sm.systems_list[system_index] = U_encode @ system @ U_encode.dag()
+
+def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    anc_key = "parity_ancilla"
+    sm.add_subsystem(2, anc_key)
+    sm.ensure_same_system(cv_key, anc_key)
+    
+    sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    _, anc_pos = sm.state_index_dict[anc_key]
+    
+    system = sm.systems_list[sys_idx]
+    dims = system.dims[0]
+
+    parity_check = 0
+    for n in range(N):
+        proj_n = qt.basis(N, n).proj()
+        op_list = [qt.qeye(d) for d in dims]
+        op_list[cv_pos] = proj_n
+        if n % 2 != 0:
+            op_list[anc_pos] = qt.sigmax()
+        parity_check += qt.tensor(*op_list)
+    parity_check = cast(qt.Qobj, parity_check)
+
+    op_list_no_err = [qt.qeye(d) for d in dims]
+    op_list_no_err[anc_pos] = qt.basis(2, 0).proj()
+    term_a = qt.tensor(*op_list_no_err)
+    
+    op_list_err = [qt.qeye(d) for d in dims]
+    op_list_err[anc_pos] = qt.basis(2, 1).proj()
+    op_list_err[cv_pos] = qt.create(N)
+    term_b = qt.tensor(*op_list_err)
+    
+    recovery_gate = term_a + term_b
+
+    U_correct = recovery_gate @ parity_check
+    if system.isket:
+        system = U_correct @ system
+        system = system.unit()
+    else:
+        system = U_correct @ system @ U_correct.dag()
+        system = system / system.tr()
+    
+    sm.systems_list[sys_idx] = system
+    sm.ptrace_subsystem(anc_key)
+
+    sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    system = sm.systems_list[sys_idx]
+    dims = system.dims[0]
+
+    l0 = (qt.basis(N, 0) + qt.basis(N, 4)).unit()
+    l1 = qt.basis(N, 2)
+    vac = qt.basis(N, 0)
+
+    op_map0 = [qt.qeye(d) for d in dims]
+    op_map0[qubit_pos] = qt.basis(2, 0).proj()
+    op_map0[cv_pos] = vac @ l0.dag()
+
+    op_map1 = [qt.qeye(d) for d in dims]
+    op_map1[qubit_pos] = qt.basis(2, 1) @ qt.basis(2, 0).dag()
+    op_map1[cv_pos] = vac @ l1.dag()
+
+    U_decode = qt.tensor(*op_map0) + qt.tensor(*op_map1)
+
+    if system.isket:
+        sm.systems_list[sys_idx] = (U_decode @ system).unit()
+    else:
+        res = U_decode @ system @ U_decode.dag()
+        sm.systems_list[sys_idx] = res / res.tr()
 
 def apply_direct_loss(sm: StateManager, key: str, loss_prob: float):
     system_index, local_idx = sm.state_index_dict[key]
@@ -631,8 +729,9 @@ def phase_wrap_repetition_decode(sm: StateManager, target_key: str, source_key_l
 
 class ChannelType(Enum):
     CV_CAT = 1
-    DV_SINGLE_MODE = 2
-    DV_DUAL_MODE_MIXED = 3
+    CV_KITTEN = 2
+    DV_SINGLE_MODE = 3
+    DV_DUAL_MODE_MIXED = 4
 
 @dataclass
 class PhyLayerConfiguration:
@@ -646,6 +745,11 @@ class PhyLayerConfiguration:
                 raise ValueError(
                     f"ChannelType.CV_CAT requires both 'N' and 'vertical_displacement'. "
                     f"Got: N={self.N}, displacement={self.vertical_displacement}"
+                )
+        if self.channel_type == ChannelType.CV_KITTEN:
+            if self.N < 5:
+                raise ValueError(
+                    f"N={self.N} too low for Kitten state (min N=5)"
                 )
 
 class EncodingType(Enum):
@@ -721,6 +825,13 @@ def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHA
             apply_kraus_loss(sm, f"channel_{i}_cat", loss_prob)
             apply_ideal_cat_state_decoding(sm, f"channel_{i}_rx", f"channel_{i}_cat", ph.vertical_displacement, N)
             sm.ptrace_subsystem(f"channel_{i}_cat")
+        if ph.channel_type is ChannelType.CV_KITTEN:
+            sm.add_subsystem(N, f"channel_{i}_kitten")
+            apply_kitten_state_encoding(sm, f"channel_{i}_tx", f"channel_{i}_kitten", N)
+            sm.ptrace_subsystem(f"channel_{i}_tx")
+            apply_kraus_loss(sm, f"channel_{i}_kitten", loss_prob)
+            apply_kitten_state_decoding(sm, f"channel_{i}_rx", f"channel_{i}_kitten", N)
+            sm.ptrace_subsystem(f"channel_{i}_kitten")
         elif ph.channel_type is ChannelType.DV_SINGLE_MODE:
             sm.add_subsystem(N, f"channel_{i}_dv_mode")
             apply_single_mode_encoding(sm, f"channel_{i}_tx", f"channel_{i}_dv_mode")
@@ -758,6 +869,16 @@ def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHA
 
 phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]]]] = [
     (
+        PhyLayerConfiguration(channel_type=ChannelType.CV_KITTEN, N=5), 
+        [
+            (EncodingType.SWAP_DUMMY_ENCODING, 1),
+            (EncodingType.REPETITION_BIT_FLIP, 3),
+            (EncodingType.REPETITION_PHASE_FLIP, 3),
+            (EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+        ]
+    ),
+    (
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT, N=18, vertical_displacement=1.5), 
         [
             (EncodingType.SWAP_DUMMY_ENCODING, 1),
@@ -782,19 +903,20 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     ),
 ]
 
-loss_prob_list = np.logspace(np.log10(0.001), np.log10(0.75), num=50)
+loss_prob_list = np.logspace(np.log10(0.001), np.log10(0.9), num=50)
 
 
 # Define line styles for different physical layers to distinguish them
 styles = {
     ChannelType.CV_CAT: "solid",
+    ChannelType.CV_KITTEN: "dotted",
     ChannelType.DV_SINGLE_MODE: "dashed",
     ChannelType.DV_DUAL_MODE_MIXED: "dashdot",
 }
 
 
 for phy_config, codes in phy_config_list:
-    mode_name = "CAT" if phy_config.channel_type is ChannelType.CV_CAT else "DV-1M" if phy_config.channel_type is ChannelType.DV_SINGLE_MODE else "DV-2M-MIXED"
+    mode_name = "CV-CAT" if phy_config.channel_type is ChannelType.CV_CAT else "CV-KIT" if phy_config.channel_type is ChannelType.CV_KITTEN else "DV-1M" if phy_config.channel_type is ChannelType.DV_SINGLE_MODE else "DV-2M-MIXED"
     ls = styles[phy_config.channel_type]
     
     print(f"phy_config.channel_type: {phy_config.channel_type.name}")
