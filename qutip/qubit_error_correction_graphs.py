@@ -884,7 +884,7 @@ def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHA
         sm.ptrace_subsystem(f"channel_{i}_rx")
 
 
-    edge_qubits = sm.ptrace_keep(["tx_edge", "rx_edge"])
+    edge_qubits = sm.ptrace_keep(["tx_edge", "rx_edge"]).unit()
     fid = qt.fidelity(edge_qubits, ideal_rho)
     return fid
 
@@ -927,7 +927,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     ),
 ]
 
-loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.9), num=50)
+loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.9), num=40)
 
 
 # Define line styles for different physical layers to distinguish them
