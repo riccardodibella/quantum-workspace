@@ -1,6 +1,7 @@
 # pyright: basic
 
 from dataclasses import dataclass
+import inspect
 from typing import Self, cast
 import matplotlib.pyplot as plt
 import numpy as np
@@ -130,6 +131,28 @@ class StateManager:
 
 
 
+def apply_dual_mode_encoding(sm: StateManager, qubit_key: str, mode_1_key: str, mode_2_key: str):
+    assert mode_1_key != mode_2_key
+    apply_x(sm, mode_1_key)
+    apply_cnot(sm, qubit_key, mode_2_key)
+    apply_cnot(sm, mode_2_key, mode_1_key)
+    apply_cnot(sm, mode_2_key, qubit_key)
+
+def apply_dual_mode_decoding_mixed(sm: StateManager, qubit_key: str, mode_1_key: str, mode_2_key: str):
+    assert mode_1_key != mode_2_key
+
+    anc_key = f"{inspect.currentframe().f_code.co_name} ancilla" # type: ignore
+    sm.add_subsystem(2, anc_key)
+    apply_cnot(sm, mode_1_key, anc_key)
+    apply_cnot(sm, mode_2_key, anc_key)
+    # We don't care about the ancilla and we decode regardless
+    # If a photon was lost we will arrive at some mixed state after the ptraces, but in this decoding we don't care 
+    sm.ptrace_subsystem(anc_key) 
+
+    apply_cnot(sm, mode_2_key, qubit_key)
+    apply_cnot(sm, mode_2_key, mode_1_key)
+    apply_cnot(sm, qubit_key, mode_2_key)
+    apply_x(sm, mode_1_key) 
 
 def apply_single_mode_encoding(sm: StateManager, qubit_key: str, cv_key: str):
     """
@@ -388,6 +411,20 @@ def apply_kraus_loss(
 
     sm.systems_list[system_index] = rho_out
 
+def apply_x(sm: StateManager, target_key: str):
+    system_index, target_idx = sm.state_index_dict[target_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    
+    op_list = [qt.qeye(d) for d in dims]
+    op_list[target_idx] = qt.gates.sigmax()
+    
+    X_total = qt.tensor(*op_list)
+    if system.isket:
+        sm.systems_list[system_index] = X_total @ system
+    else:
+        sm.systems_list[system_index] = X_total @ system @ X_total.dag()
 
 def apply_hadamard(sm: StateManager, target_key: str):
     system_index, target_idx = sm.state_index_dict[target_key]
@@ -595,6 +632,7 @@ def phase_wrap_repetition_decode(sm: StateManager, target_key: str, source_key_l
 class ChannelType(Enum):
     CV_CAT = 1
     DV_SINGLE_MODE = 2
+    DV_DUAL_MODE_MIXED = 3
 
 @dataclass
 class PhyLayerConfiguration:
@@ -690,6 +728,17 @@ def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHA
             apply_kraus_loss(sm, f"channel_{i}_dv_mode", loss_prob)
             apply_single_mode_decoding(sm, f"channel_{i}_rx", f"channel_{i}_dv_mode")
             sm.ptrace_subsystem(f"channel_{i}_dv_mode")
+        elif ph.channel_type is ChannelType.DV_DUAL_MODE_MIXED:
+            sm.add_subsystem(N, f"channel_{i}_mode_1")
+            sm.add_subsystem(N, f"channel_{i}_mode_2")
+            apply_dual_mode_encoding(sm, f"channel_{i}_tx", f"channel_{i}_mode_1", f"channel_{i}_mode_2")
+            sm.ptrace_subsystem(f"channel_{i}_tx")
+            apply_kraus_loss(sm, f"channel_{i}_mode_1", loss_prob)
+            apply_kraus_loss(sm, f"channel_{i}_mode_2", loss_prob)
+            apply_dual_mode_decoding_mixed(sm, f"channel_{i}_rx", f"channel_{i}_mode_1", f"channel_{i}_mode_2")
+            sm.ptrace_subsystem(f"channel_{i}_mode_1")
+            sm.ptrace_subsystem(f"channel_{i}_mode_2")
+
             
 
     sm.add_subsystem(2, "rx_edge")
@@ -724,20 +773,28 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             (EncodingType.SHOR_9_QUBITS, 9),
         ]
     ),
+    (
+        PhyLayerConfiguration(channel_type=ChannelType.DV_DUAL_MODE_MIXED), 
+        [
+            (EncodingType.SWAP_DUMMY_ENCODING, 1),
+            (EncodingType.SHOR_9_QUBITS, 9),
+        ]
+    ),
 ]
 
-loss_prob_list = np.logspace(np.log10(0.001), np.log10(0.75), num=20)
+loss_prob_list = np.logspace(np.log10(0.001), np.log10(0.75), num=50)
 
 
 # Define line styles for different physical layers to distinguish them
 styles = {
     ChannelType.CV_CAT: "solid",
-    ChannelType.DV_SINGLE_MODE: "dashed"
+    ChannelType.DV_SINGLE_MODE: "dashed",
+    ChannelType.DV_DUAL_MODE_MIXED: "dashdot",
 }
 
 
 for phy_config, codes in phy_config_list:
-    mode_name = "CAT" if phy_config.channel_type == ChannelType.CV_CAT else "DV-1M"
+    mode_name = "CAT" if phy_config.channel_type is ChannelType.CV_CAT else "DV-1M" if phy_config.channel_type is ChannelType.DV_SINGLE_MODE else "DV-2M-MIXED"
     ls = styles[phy_config.channel_type]
     
     print(f"phy_config.channel_type: {phy_config.channel_type.name}")
