@@ -379,24 +379,48 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
         parity_check += qt.tensor(*op_list)
     parity_check = cast(qt.Qobj, parity_check)
 
+    l0 = (qt.basis(N, 0) + qt.basis(N, 4)).unit()
+    l1 = qt.basis(N, 2)
+
+    a = qt.destroy(N)
+
+    e0 = (a @ l0).unit()
+    e1 = (a @ l1).unit()
+
+    P_l0 = l0 @ l0.dag()
+    P_l1 = l1 @ l1.dag()
+    P_e0 = e0 @ e0.dag()
+    P_e1 = e1 @ e1.dag()
+
+    I_cv = qt.qeye(N)
+    P_sub = P_l0 + P_l1 + P_e0 + P_e1
+    P_perp = I_cv - P_sub
+
+    U_corr_cv = (
+        l0 @ e0.dag()
+        + l1 @ e1.dag()
+        + e0 @ l0.dag()
+        + e1 @ l1.dag()
+        + P_perp
+    )
+
     op_list_no_err = [qt.qeye(d) for d in dims]
     op_list_no_err[anc_pos] = qt.basis(2, 0).proj()
-    term_a = qt.tensor(*op_list_no_err)
-    
+    term_no_err = qt.tensor(*op_list_no_err)
+
     op_list_err = [qt.qeye(d) for d in dims]
     op_list_err[anc_pos] = qt.basis(2, 1).proj()
-    op_list_err[cv_pos] = qt.create(N)
-    term_b = qt.tensor(*op_list_err)
-    
-    recovery_gate = term_a + term_b
+    op_list_err[cv_pos] = U_corr_cv
+    term_err = qt.tensor(*op_list_err)
+
+    recovery_gate = term_no_err + term_err
 
     U_correct = recovery_gate @ parity_check
+
     if system.isket:
         system = U_correct @ system
-        system = system.unit()
     else:
         system = U_correct @ system @ U_correct.dag()
-        system = system / system.tr()
     
     sm.systems_list[sys_idx] = system
     sm.ptrace_subsystem(anc_key)
@@ -903,7 +927,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     ),
 ]
 
-loss_prob_list = np.logspace(np.log10(0.001), np.log10(0.9), num=50)
+loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.9), num=50)
 
 
 # Define line styles for different physical layers to distinguish them
