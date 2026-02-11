@@ -707,46 +707,59 @@ def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHA
 
 
 
-phy_config_list: list[PhyLayerConfiguration] = [PhyLayerConfiguration(channel_type=ChannelType.CV_CAT, N=40, vertical_displacement=2.5), PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE)]
+phy_config_list: list[PhyLayerConfiguration] = [
+    PhyLayerConfiguration(channel_type=ChannelType.CV_CAT, N=18, vertical_displacement=1.5), 
+    PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE)
+]
 
-loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.75), num=6)
+loss_prob_list = np.logspace(np.log10(0.001), np.log10(0.75), num=20)
+
+
+# Define line styles for different physical layers to distinguish them
+styles = {
+    ChannelType.CV_CAT: "solid",
+    ChannelType.DV_SINGLE_MODE: "dashed"
+}
+
 
 for phy_config in phy_config_list:
-    print(f"phy_config {phy_config}")
-
+    print(f"phy_config_list.channel_type: {phy_config.channel_type.name}")
+    
     res_swap_list = []
     res_bit_repetition_list = []
     res_phase_repetition_list = []
     res_shor_list = []
     res_bit_wrap_list = []
-    res_phase_wrap_list = []
+    
     for loss_prob in loss_prob_list:
+        print(f"\tloss_prob: {loss_prob}")
+        
+        # 1 Qubit
+        res_swap_list.append(run_fidelity_simulation(phy_config, loss_prob, 1, EncodingType.SWAP_DUMMY_ENCODING))
+        res_bit_repetition_list.append(run_fidelity_simulation(phy_config, loss_prob, 3, EncodingType.REPETITION_BIT_FLIP))
+        res_phase_repetition_list.append(run_fidelity_simulation(phy_config, loss_prob, 3, EncodingType.REPETITION_PHASE_FLIP))
+        res_shor_list.append(run_fidelity_simulation(phy_config, loss_prob, 9, EncodingType.SHOR_9_QUBITS))
+        res_bit_wrap_list.append(run_fidelity_simulation(phy_config, loss_prob, 9, EncodingType.REPETITION_BIT_FLIP_WRAP))
 
-        print(f"loss_prob {loss_prob}")
-        res_swap_list += [run_fidelity_simulation(phy_config, loss_prob, NUM_CHANNEL_QUBITS=1, encoding_type=EncodingType.SWAP_DUMMY_ENCODING)]
-        res_bit_repetition_list += [run_fidelity_simulation(phy_config, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_BIT_FLIP)]
-        res_phase_repetition_list += [run_fidelity_simulation(phy_config, loss_prob, NUM_CHANNEL_QUBITS=3, encoding_type=EncodingType.REPETITION_PHASE_FLIP)]
-        res_shor_list += [run_fidelity_simulation(phy_config, loss_prob, NUM_CHANNEL_QUBITS=9, encoding_type=EncodingType.SHOR_9_QUBITS)]
-        res_bit_wrap_list += [run_fidelity_simulation(phy_config, loss_prob, NUM_CHANNEL_QUBITS=9, encoding_type=EncodingType.REPETITION_BIT_FLIP_WRAP)]
+    # Plotting this physical layer's data
+    ls = styles[phy_config.channel_type]
+    mode_name = "CAT" if phy_config.channel_type == ChannelType.CV_CAT else "DV"
 
+    plt.loglog(loss_prob_list, res_swap_list, ls=ls, label=f'[{mode_name}] No Encoding (1 qubit)')
+    plt.loglog(loss_prob_list, res_bit_repetition_list, ls=ls, label=f'[{mode_name}] Bit Flip repetition (3 qubits)')
+    plt.loglog(loss_prob_list, res_phase_repetition_list, ls=ls, label=f'[{mode_name}] Phase Flip repetition (3 qubits)')
+    plt.loglog(loss_prob_list, res_shor_list, ls=ls, label=f'[{mode_name}] Shor code (9 qubits)')
+    plt.loglog(loss_prob_list, res_bit_wrap_list, ls=ls, label=f'[{mode_name}] Bit Flip wrap (9 qubits)')
 
-    plt.loglog(loss_prob_list, res_swap_list, label='No Encoding (1 qubit)')
-    plt.loglog(loss_prob_list, res_bit_repetition_list, label='Bit Flip Repetition Code (3 qubits)')
-    plt.loglog(loss_prob_list, res_phase_repetition_list, label='Phase Flip Repetition Code (3 qubits)')
-    plt.loglog(loss_prob_list, res_shor_list, label='Shor Code (9 qubits)')
-    plt.loglog(loss_prob_list, res_bit_wrap_list, label='Bit Flip Wrap Code (9 qubits)')
+# Add axis labels and title
+plt.xlabel('Loss Probability')
+plt.ylabel('Fidelity')
+plt.title('Fidelity vs Channel Loss for Different Encodings')
 
+# Enable the legend
+plt.legend()
 
+# Add a grid (highly recommended for log plots)
+plt.grid(True, which="both", ls="--", alpha=0.6)
 
-    # Add axis labels and title
-    plt.xlabel('Loss Probability')
-    plt.ylabel('Fidelity')
-    plt.title('Fidelity vs Channel Loss for Different Encodings')
-
-    # Enable the legend
-    plt.legend()
-
-    # Add a grid (highly recommended for log plots)
-    plt.grid(True, which="both", ls="--", alpha=0.6)
-
-    plt.show()
+plt.show()
