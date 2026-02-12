@@ -99,7 +99,6 @@ class StateManager:
         assert len(self.systems_list) == 1
         return qt.ket2dm(self.systems_list[0]) if force_density_matrix and self.systems_list[0].isket else self.systems_list[0]
 
-
     def clone(self) -> Self:
         new_manager = StateManager()
         # Create a new list with copies of each Qobj
@@ -450,42 +449,6 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
         res = U_decode @ system @ U_decode.dag()
         sm.systems_list[sys_idx] = res / res.tr()
 
-def apply_direct_loss(sm: StateManager, key: str, loss_prob: float):
-    system_index, local_idx = sm.state_index_dict[key]
-    system = sm.systems_list[system_index]
-    
-    # 1. Ensure we are working with a density matrix
-    # Loss is a non-unitary process, so the state must become a DM
-    if system.isket:
-        system = qt.ket2dm(system)
-    
-    dims = system.dims[0]
-    N = dims[local_idx]
-    assert isinstance(N, int)
-    
-    # 2. Construct the collapse operator (A_global)
-    # This acts as 'a' on the target mode and Identity everywhere else
-    a = qt.destroy(N)
-    op_list = [qt.qeye(d) for d in dims]
-    op_list[local_idx] = a
-    A_global = qt.tensor(*op_list)
-    
-    # 3. Solve the Lindblad master equation
-    # The 'time' here represents the strength of the coupling to the environment
-    t_loss = -np.log(1 - loss_prob)
-    
-    # H=0 because we only care about the dissipation (loss)
-    # We use a simple 2-point tlist to get the final state
-    result = qt.mesolve(
-        H=0 * A_global, # Zero Hamiltonian
-        rho0=system, 
-        tlist=[0, t_loss], 
-        c_ops=[A_global]
-    )
-    
-    # 4. Update the manager with the resulting density matrix
-    sm.systems_list[system_index] = result.states[-1]
-
 def apply_kraus_loss(
     sm: StateManager,
     key: str,
@@ -495,7 +458,6 @@ def apply_kraus_loss(
     system_index, local_idx = sm.state_index_dict[key]
     system = sm.systems_list[system_index]
 
-    # Ensure density matrix
     if system.isket:
         system = qt.ket2dm(system)
 
@@ -507,11 +469,9 @@ def apply_kraus_loss(
     if k_max is None:
         k_max = N - 1
 
-    # Single-mode operators
     a = qt.destroy(N)
     n = a.dag() @ a
 
-    # THIS is the key fix
     eta_n: qt.Qobj = (0.5 * np.log(eta) * n).expm()
 
     id_ops = [qt.qeye(d) for d in dims]
@@ -534,6 +494,21 @@ def apply_kraus_loss(
     sm.systems_list[system_index] = rho_out
 
 def apply_x(sm: StateManager, target_key: str):
+    system_index, target_idx = sm.state_index_dict[target_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    
+    op_list = [qt.qeye(d) for d in dims]
+    op_list[target_idx] = qt.gates.sigmax()
+    
+    X_total = qt.tensor(*op_list)
+    if system.isket:
+        sm.systems_list[system_index] = X_total @ system
+    else:
+        sm.systems_list[system_index] = X_total @ system @ X_total.dag()
+
+def apply_z(sm: StateManager, target_key: str):
     system_index, target_idx = sm.state_index_dict[target_key]
     
     system = sm.systems_list[system_index]
@@ -627,9 +602,6 @@ def apply_toffoli(sm: StateManager, ctrl1_key: str, ctrl2_key: str, target_key: 
     # We use element-wise multiplication of the lists to build the tensor components
     U_toffoli = qt.tensor(*op_list_id) + (qt.tensor(*proj_11) @ qt.tensor(*op_list_id).dag() @ qt.tensor(*op_x_minus_i))
     
-    # Faster/Cleaner alternative for U_toffoli if dimensions are standard:
-    # U_toffoli = qt.tensor(op_list_id) + qt.tensor([qt.basis(2,1).proj() if i == ctrl1 or i == ctrl2 else (qt.sigmax()-qt.qeye(2)) if i == target else qt.qeye(d) for i, d in enumerate(dims)])
-
     if system.isket:
         sm.systems_list[system_index] = U_toffoli @ system
     else:
@@ -677,15 +649,11 @@ def shor_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
 
     q = target_key_list
 
-    # Phase repetition on the first qubit into q[0], q[3], q[6]
     phase_repetition_encode(sm, source_key, [q[0], q[3], q[6]])
 
-    # Bit repetition on each block
     repetition_encode(sm, q[0], [q[0], q[1], q[2]])
     repetition_encode(sm, q[3], [q[3], q[4], q[5]])
     repetition_encode(sm, q[6], [q[6], q[7], q[8]])
-
-
 
 def shor_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
     if len(source_key_list) != 9:
@@ -693,12 +661,10 @@ def shor_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
 
     q = source_key_list
 
-    # Decode bit-flip repetition in each block
     repetition_decode(sm, q[0], [q[0], q[1], q[2]])
     repetition_decode(sm, q[3], [q[3], q[4], q[5]])
     repetition_decode(sm, q[6], [q[6], q[7], q[8]])
 
-    # Decode phase repetition across the blocks
     phase_repetition_decode(sm, target_key, [q[0], q[3], q[6]])
 
 def wrap_repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
@@ -707,10 +673,8 @@ def wrap_repetition_encode(sm: StateManager, source_key: str, target_key_list: l
 
     q = target_key_list
 
-    # Phase repetition on the first qubit into q[0], q[3], q[6]
     repetition_encode(sm, source_key, [q[0], q[3], q[6]])
 
-    # Bit repetition on each block
     repetition_encode(sm, q[0], [q[0], q[1], q[2]])
     repetition_encode(sm, q[3], [q[3], q[4], q[5]])
     repetition_encode(sm, q[6], [q[6], q[7], q[8]])
@@ -721,12 +685,10 @@ def wrap_repetition_decode(sm: StateManager, target_key: str, source_key_list: l
 
     q = source_key_list
 
-    # Decode bit-flip repetition in each block
     repetition_decode(sm, q[0], [q[0], q[1], q[2]])
     repetition_decode(sm, q[3], [q[3], q[4], q[5]])
     repetition_decode(sm, q[6], [q[6], q[7], q[8]])
 
-    # Decode phase repetition across the blocks
     repetition_decode(sm, target_key, [q[0], q[3], q[6]])
 
 def phase_wrap_repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
@@ -874,15 +836,12 @@ def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHA
             sm.ptrace_subsystem(f"channel_{i}_mode_1")
             sm.ptrace_subsystem(f"channel_{i}_mode_2")
 
-            
-
     sm.add_subsystem(2, "rx_edge")
 
     generic_decode(sm, "rx_edge", [f"channel_{i}_rx" for i in range(NUM_CHANNEL_QUBITS)], encoding_type)
 
     for i in range(NUM_CHANNEL_QUBITS):
         sm.ptrace_subsystem(f"channel_{i}_rx")
-
 
     edge_qubits = sm.ptrace_keep(["tx_edge", "rx_edge"]).unit()
     fid = qt.fidelity(edge_qubits, ideal_rho)
