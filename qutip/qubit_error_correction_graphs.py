@@ -449,6 +449,121 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
         res = U_decode @ system @ U_decode.dag()
         sm.systems_list[sys_idx] = res / res.tr()
 
+def apply_4_legged_cat_encoding(sm: StateManager, qubit_key: str, cv_key: str, alpha: complex, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    system_index, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+
+    vac = qt.basis(N, 0)
+    c_p = qt.displace(N, alpha) @ vac # type: ignore
+    c_m = qt.displace(N, -alpha) @ vac # type: ignore
+    c_ip = qt.displace(N, 1j * alpha) @ vac # type: ignore
+    c_im = qt.displace(N, -1j * alpha) @ vac # type: ignore
+
+    logical_zero = (c_p + c_m + c_ip + c_im).unit()
+    logical_one = (c_p + c_m - c_ip - c_im).unit()
+
+    map_zero = logical_zero @ vac.dag()
+    map_one  = logical_one @ vac.dag()
+
+    op0 = [qt.qeye(d) for d in dims]
+    op0[qubit_pos] = qt.basis(2, 0).proj()
+    op0[cv_pos] = map_zero
+
+    op1 = [qt.qeye(d) for d in dims]
+    op1[qubit_pos] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
+    op1[cv_pos] = map_one
+
+    U_encode = qt.tensor(*op0) + qt.tensor(*op1)
+    
+    if system.isket:
+        sm.systems_list[system_index] = U_encode @ system
+    else:
+        sm.systems_list[system_index] = U_encode @ system @ U_encode.dag()
+
+def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, alpha: complex, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    anc_key = "cat_decoding_ancilla"
+    sm.add_subsystem(2, anc_key)
+    sm.ensure_same_system(cv_key, anc_key)
+    
+    sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    _, anc_pos = sm.state_index_dict[anc_key]
+    
+    system = sm.systems_list[sys_idx]
+    dims = system.dims[0]
+
+
+    parity_check = 0
+    for n in range(N):
+        proj_n = qt.basis(N, n).proj()
+        op_list = [qt.qeye(d) for d in dims]
+        op_list[cv_pos] = proj_n
+        if n % 2 != 0:
+            op_list[anc_pos] = qt.sigmax()
+        parity_check += qt.tensor(*op_list)
+    parity_check = cast(qt.Qobj, parity_check)
+
+
+    vac = qt.basis(N, 0)
+    l0 = (qt.displace(N, alpha) @ vac + qt.displace(N, -alpha) @ vac + qt.displace(N, 1j*alpha) @ vac + qt.displace(N, -1j*alpha) @ vac).unit() # type: ignore
+    l1 = (qt.displace(N, alpha) @ vac + qt.displace(N, -alpha) @ vac - qt.displace(N, 1j*alpha) @ vac - qt.displace(N, -1j*alpha) @ vac).unit() # type: ignore
+
+    a = qt.destroy(N)
+    e0 = (a @ l0).unit()
+    e1 = (a @ l1).unit()
+
+    P_e0 = e0 @ e0.dag()
+    P_e1 = e1 @ e1.dag()
+    P_l0 = l0 @ l0.dag()
+    P_l1 = l1 @ l1.dag()
+    
+    I_cv = qt.qeye(N)
+    U_corr_cv = (l0 @ e0.dag()) + (l1 @ e1.dag()) + (e0 @ l0.dag()) + (e1 @ l1.dag()) + (I_cv - P_e0 - P_e1 - P_l0 - P_l1)
+
+    op_list_no_err = [qt.qeye(d) for d in dims]
+    op_list_no_err[anc_pos] = qt.basis(2, 0).proj()
+    
+    op_list_err = [qt.qeye(d) for d in dims]
+    op_list_err[anc_pos] = qt.basis(2, 1).proj()
+    op_list_err[cv_pos] = U_corr_cv
+    
+    recovery_gate = qt.tensor(*op_list_no_err) + qt.tensor(*op_list_err)
+    U_total = recovery_gate @ parity_check
+
+    if system.isket:
+        system = U_total @ system
+    else:
+        system = U_total @ system @ U_total.dag()
+    
+    sm.systems_list[sys_idx] = system
+    sm.ptrace_subsystem(anc_key)
+
+    sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    system = sm.systems_list[sys_idx]
+    dims = system.dims[0]
+
+    op_map0 = [qt.qeye(d) for d in dims]
+    op_map0[qubit_pos] = qt.basis(2, 0).proj()
+    op_map0[cv_pos] = vac @ l0.dag()
+
+    op_map1 = [qt.qeye(d) for d in dims]
+    op_map1[qubit_pos] = qt.basis(2, 1) @ qt.basis(2, 0).dag()
+    op_map1[cv_pos] = vac @ l1.dag()
+
+    U_decode = qt.tensor(*op_map0) + qt.tensor(*op_map1)
+
+    if system.isket:
+        sm.systems_list[sys_idx] = (U_decode @ system).unit()
+    else:
+        res = U_decode @ system @ U_decode.dag()
+        sm.systems_list[sys_idx] = res / res.tr()
+
 def apply_kraus_loss(
     sm: StateManager,
     key: str,
@@ -718,12 +833,14 @@ class ChannelType(Enum):
     CV_KITTEN = 2
     DV_SINGLE_MODE = 3
     DV_DUAL_MODE_MIXED = 4
+    CV_CAT_4 = 5
 
 @dataclass
 class PhyLayerConfiguration:
     channel_type: ChannelType
     N: int = 2
     vertical_displacement: float | None = None
+    alpha: complex | None = None
 
     def __post_init__(self):
         if self.channel_type == ChannelType.CV_CAT:
@@ -731,6 +848,12 @@ class PhyLayerConfiguration:
                 raise ValueError(
                     f"ChannelType.CV_CAT requires both 'N' and 'vertical_displacement'. "
                     f"Got: N={self.N}, displacement={self.vertical_displacement}"
+                )
+        if self.channel_type == ChannelType.CV_CAT_4:
+            if self.N is None or self.alpha is None:
+                raise ValueError(
+                    f"ChannelType.CV_CAT_4 requires both 'N' and 'alpha'. "
+                    f"Got: N={self.N}, alpha={self.alpha}"
                 )
         if self.channel_type == ChannelType.CV_KITTEN:
             if self.N < 5:
@@ -811,6 +934,14 @@ def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHA
             apply_kraus_loss(sm, f"channel_{i}_cat", loss_prob)
             apply_ideal_cat_state_decoding(sm, f"channel_{i}_rx", f"channel_{i}_cat", ph.vertical_displacement, N)
             sm.ptrace_subsystem(f"channel_{i}_cat")
+        if ph.channel_type is ChannelType.CV_CAT_4:
+            assert ph.alpha is not None
+            sm.add_subsystem(N, f"channel_{i}_cat")
+            apply_4_legged_cat_encoding(sm, f"channel_{i}_tx", f"channel_{i}_cat", ph.alpha, N)
+            sm.ptrace_subsystem(f"channel_{i}_tx")
+            apply_kraus_loss(sm, f"channel_{i}_cat", loss_prob)
+            apply_4_legged_cat_decoding(sm, f"channel_{i}_rx", f"channel_{i}_cat", ph.alpha, N)
+            sm.ptrace_subsystem(f"channel_{i}_cat")
         if ph.channel_type is ChannelType.CV_KITTEN:
             sm.add_subsystem(N, f"channel_{i}_kitten")
             apply_kitten_state_encoding(sm, f"channel_{i}_tx", f"channel_{i}_kitten", N)
@@ -871,6 +1002,16 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         ]
     ),
     (
+        PhyLayerConfiguration(channel_type=ChannelType.CV_CAT_4, N=20, alpha=1.5), 
+        [
+            (EncodingType.SWAP_DUMMY_ENCODING, 1),
+            (EncodingType.REPETITION_BIT_FLIP, 3),
+            (EncodingType.REPETITION_PHASE_FLIP, 3),
+            (EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+        ]
+    ),
+    (
         PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE), 
         [
             (EncodingType.SWAP_DUMMY_ENCODING, 1),
@@ -886,12 +1027,13 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     ),
 ]
 
-loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.9), num=40)
+loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.9), num=100)
 
 
 # Define line styles for different physical layers to distinguish them
 styles = {
     ChannelType.CV_CAT: "solid",
+    ChannelType.CV_CAT_4: "solid",
     ChannelType.CV_KITTEN: "dotted",
     ChannelType.DV_SINGLE_MODE: "dashed",
     ChannelType.DV_DUAL_MODE_MIXED: "dashdot",
@@ -899,7 +1041,7 @@ styles = {
 
 
 for phy_config, codes in phy_config_list:
-    mode_name = "CV-CAT" if phy_config.channel_type is ChannelType.CV_CAT else "CV-KIT" if phy_config.channel_type is ChannelType.CV_KITTEN else "DV-1M" if phy_config.channel_type is ChannelType.DV_SINGLE_MODE else "DV-2M-MIXED"
+    mode_name = "CV-CAT" if phy_config.channel_type is ChannelType.CV_CAT else "CV-CAT4" if phy_config.channel_type is ChannelType.CV_CAT_4 else "CV-KIT" if phy_config.channel_type is ChannelType.CV_KITTEN else "DV-1M" if phy_config.channel_type is ChannelType.DV_SINGLE_MODE else "DV-2M-MIXED"
     ls = styles[phy_config.channel_type]
     
     print(f"phy_config.channel_type: {phy_config.channel_type.name}")
