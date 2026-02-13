@@ -127,7 +127,15 @@ class StateManager:
             print(f"  Keys: {', '.join(keys_in_system)}")
         print(f"Raw dict: {self.state_index_dict}")
         print("---------------------------------------\n")
-
+    
+    def apply_operation(self, system_index: int, operator: qt.Qobj) -> None:
+        system = self.systems_list[system_index]
+        if system.isket:
+            system = (operator @ system).unit()
+        else:
+            system = operator @ system @ operator.dag()
+            system = system / system.tr()
+        self.systems_list[system_index] = system
 
 
 def apply_dual_mode_encoding(sm: StateManager, qubit_key: str, mode_1_key: str, mode_2_key: str):
@@ -185,10 +193,7 @@ def apply_single_mode_encoding(sm: StateManager, qubit_key: str, cv_key: str):
 
     U_encode = qt.tensor(*op0) + qt.tensor(*op1)
 
-    if system.isket:
-        sm.systems_list[system_index] = U_encode @ system
-    else:
-        sm.systems_list[system_index] = U_encode @ system @ U_encode.dag()
+    sm.apply_operation(system_index, U_encode)
 
 def apply_single_mode_decoding(sm: StateManager, qubit_key: str, cv_key: str):
     """
@@ -216,10 +221,7 @@ def apply_single_mode_decoding(sm: StateManager, qubit_key: str, cv_key: str):
 
     U_decode = qt.tensor(*op0) + qt.tensor(*op1)
 
-    if system.isket:
-        sm.systems_list[system_index] = U_decode @ system
-    else:
-        sm.systems_list[system_index] = U_decode @ system @ U_decode.dag()
+    sm.apply_operation(system_index, U_decode)
 
 
 def apply_cat_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, vertical_displacement: float, N: int):
@@ -264,11 +266,7 @@ def apply_cat_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, vert
     # 3. Combine into the full encoding operator
     U_encode = build_gate(0) + build_gate(1)
 
-    # return U_encode * input_states
-    if system.isket:
-        sm.systems_list[system_index] = U_encode @ system
-    else:
-        sm.systems_list[system_index] = U_encode @ system @ U_encode.dag()
+    sm.apply_operation(system_index, U_encode)
 
 def apply_ideal_cat_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, vertical_displacement: float, N: int):
     sm.ensure_same_system(qubit_key, cv_key)
@@ -321,10 +319,7 @@ def apply_ideal_cat_state_decoding(sm: StateManager, qubit_key: str, cv_key: str
     U_total = build_clean() @ build_flip()
     
     # Inside apply_ideal_cat_state_decoding:
-    if system.isket:
-        sm.systems_list[system_index] = U_total @ system
-    else:
-        sm.systems_list[system_index] = U_total @ system @ U_total.dag()
+    sm.apply_operation(system_index, U_total)
 
 def apply_kitten_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, N: int):
     sm.ensure_same_system(qubit_key, cv_key)
@@ -350,10 +345,7 @@ def apply_kitten_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, N
 
     U_encode = qt.tensor(*op0) + qt.tensor(*op1)
     
-    if system.isket:
-        sm.systems_list[system_index] = U_encode @ system
-    else:
-        sm.systems_list[system_index] = U_encode @ system @ U_encode.dag()
+    sm.apply_operation(system_index, U_encode)
 
 def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N: int):
     sm.ensure_same_system(qubit_key, cv_key)
@@ -416,12 +408,8 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
 
     U_correct = recovery_gate @ parity_check
 
-    if system.isket:
-        system = U_correct @ system
-    else:
-        system = U_correct @ system @ U_correct.dag()
+    sm.apply_operation(sys_idx, U_correct)
     
-    sm.systems_list[sys_idx] = system
     sm.ptrace_subsystem(anc_key)
 
     sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
@@ -443,11 +431,7 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
 
     U_decode = qt.tensor(*op_map0) + qt.tensor(*op_map1)
 
-    if system.isket:
-        sm.systems_list[sys_idx] = (U_decode @ system).unit()
-    else:
-        res = U_decode @ system @ U_decode.dag()
-        sm.systems_list[sys_idx] = res / res.tr()
+    sm.apply_operation(sys_idx, U_decode)
 
 def apply_4_legged_cat_encoding(sm: StateManager, qubit_key: str, cv_key: str, alpha: complex, N: int):
     sm.ensure_same_system(qubit_key, cv_key)
@@ -479,10 +463,7 @@ def apply_4_legged_cat_encoding(sm: StateManager, qubit_key: str, cv_key: str, a
 
     U_encode = qt.tensor(*op0) + qt.tensor(*op1)
     
-    if system.isket:
-        sm.systems_list[system_index] = U_encode @ system
-    else:
-        sm.systems_list[system_index] = U_encode @ system @ U_encode.dag()
+    sm.apply_operation(system_index, U_encode)
 
 def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, alpha: complex, N: int):
     sm.ensure_same_system(qubit_key, cv_key)
@@ -535,12 +516,8 @@ def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, a
     recovery_gate = qt.tensor(*op_list_no_err) + qt.tensor(*op_list_err)
     U_total = recovery_gate @ parity_check
 
-    if system.isket:
-        system = U_total @ system
-    else:
-        system = U_total @ system @ U_total.dag()
+    sm.apply_operation(sys_idx, U_total)
     
-    sm.systems_list[sys_idx] = system
     sm.ptrace_subsystem(anc_key)
 
     sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
@@ -558,11 +535,7 @@ def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, a
 
     U_decode = qt.tensor(*op_map0) + qt.tensor(*op_map1)
 
-    if system.isket:
-        sm.systems_list[sys_idx] = (U_decode @ system).unit()
-    else:
-        res = U_decode @ system @ U_decode.dag()
-        sm.systems_list[sys_idx] = res / res.tr()
+    sm.apply_operation(sys_idx, U_decode)
 
 def apply_kraus_loss(
     sm: StateManager,
@@ -618,25 +591,7 @@ def apply_x(sm: StateManager, target_key: str):
     op_list[target_idx] = qt.gates.sigmax()
     
     X_total = qt.tensor(*op_list)
-    if system.isket:
-        sm.systems_list[system_index] = X_total @ system
-    else:
-        sm.systems_list[system_index] = X_total @ system @ X_total.dag()
-
-def apply_z(sm: StateManager, target_key: str):
-    system_index, target_idx = sm.state_index_dict[target_key]
-    
-    system = sm.systems_list[system_index]
-    dims = system.dims[0]
-    
-    op_list = [qt.qeye(d) for d in dims]
-    op_list[target_idx] = qt.gates.sigmax()
-    
-    X_total = qt.tensor(*op_list)
-    if system.isket:
-        sm.systems_list[system_index] = X_total @ system
-    else:
-        sm.systems_list[system_index] = X_total @ system @ X_total.dag()
+    sm.apply_operation(system_index, X_total)
 
 def apply_hadamard(sm: StateManager, target_key: str):
     system_index, target_idx = sm.state_index_dict[target_key]
@@ -650,10 +605,7 @@ def apply_hadamard(sm: StateManager, target_key: str):
     op_list[target_idx] = qt.gates.snot()
     
     H_total = qt.tensor(*op_list)
-    if system.isket:
-        sm.systems_list[system_index] = H_total @ system
-    else:
-        sm.systems_list[system_index] =  H_total @ system @ H_total.dag()
+    sm.apply_operation(system_index, H_total)
 
 def apply_cnot(sm: StateManager, control_key: str, target_key: str):
     sm.ensure_same_system(control_key, target_key)
@@ -675,10 +627,8 @@ def apply_cnot(sm: StateManager, control_key: str, target_key: str):
     op_list_1[target_idx] = qt.sigmax()
     
     CNOT_total = qt.tensor(*op_list_0) + qt.tensor(*op_list_1)
-    if system.isket:
-        sm.systems_list[system_index] = CNOT_total @ system
-    else:
-        sm.systems_list[system_index] = CNOT_total @ system @ CNOT_total.dag()
+    sm.apply_operation(system_index, CNOT_total)
+
     
 def apply_swap(sm: StateManager, key1: str, key2: str):
     if(key1 == key2):
@@ -717,10 +667,7 @@ def apply_toffoli(sm: StateManager, ctrl1_key: str, ctrl2_key: str, target_key: 
     # We use element-wise multiplication of the lists to build the tensor components
     U_toffoli = qt.tensor(*op_list_id) + (qt.tensor(*proj_11) @ qt.tensor(*op_list_id).dag() @ qt.tensor(*op_x_minus_i))
     
-    if system.isket:
-        sm.systems_list[system_index] = U_toffoli @ system
-    else:
-        sm.systems_list[system_index] = U_toffoli @ system @ U_toffoli.dag()
+    sm.apply_operation(system_index, U_toffoli)
 
 
 
@@ -1027,7 +974,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     ),
 ]
 
-loss_prob_list = np.logspace(np.log10(0.01), np.log10(0.9), num=100)
+loss_prob_list = np.logspace(np.log10(0.05), np.log10(0.9), num=50)
 
 
 # Define line styles for different physical layers to distinguish them
