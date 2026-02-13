@@ -974,8 +974,8 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     ),
 ]
 
-loss_prob_list = np.logspace(np.log10(0.05), np.log10(0.9), num=50)
-
+loss_prob_list = list(np.logspace(np.log10(0.05), np.log10(0.8), num=50)) + list(np.linspace(0.81, 0.99, 19))
+print(loss_prob_list)
 
 # Define line styles for different physical layers to distinguish them
 styles = {
@@ -987,39 +987,62 @@ styles = {
 }
 
 
+# Store results to reuse for both plots
+results = []
+
 for phy_config, codes in phy_config_list:
-    mode_name = "CV-CAT" if phy_config.channel_type is ChannelType.CV_CAT else "CV-CAT4" if phy_config.channel_type is ChannelType.CV_CAT_4 else "CV-KIT" if phy_config.channel_type is ChannelType.CV_KITTEN else "DV-1M" if phy_config.channel_type is ChannelType.DV_SINGLE_MODE else "DV-2M-MIXED"
+    mode_name = (
+        "CV-CAT" if phy_config.channel_type is ChannelType.CV_CAT else
+        "CV-CAT4" if phy_config.channel_type is ChannelType.CV_CAT_4 else
+        "CV-KIT" if phy_config.channel_type is ChannelType.CV_KITTEN else
+        "DV-1M" if phy_config.channel_type is ChannelType.DV_SINGLE_MODE else
+        "DV-2M-MIXED"
+    )
     ls = styles[phy_config.channel_type]
-    
+
     print(f"phy_config.channel_type: {phy_config.channel_type.name}")
 
-    # For each encoding/qubit-count pair in the config
     for encoding_type, num_qubits in codes:
         fidelities = []
         label = f"[{mode_name}] {encoding_type.name} ({num_qubits} qubits)"
-        
+
         print(f"\tencoding_type: {encoding_type.name}")
-        
+
         for loss_prob in loss_prob_list:
             print(f"\t\tloss_prob: {loss_prob}")
             fid = run_fidelity_simulation(
-                ph=phy_config, 
-                loss_prob=loss_prob, 
-                NUM_CHANNEL_QUBITS=num_qubits, 
+                ph=phy_config,
+                loss_prob=loss_prob,
+                NUM_CHANNEL_QUBITS=num_qubits,
                 encoding_type=encoding_type
             )
             fidelities.append(fid)
-            
-        # Plot this specific line
-        plt.loglog(loss_prob_list, fidelities, ls=ls, label=label)
 
-# Formatting the Plot
+        # Save results for plotting
+        results.append((loss_prob_list, fidelities, ls, label))
+
+# ------------------------
+# Log-Log Plot
+plt.figure()
+for x, y, ls, label in results:
+    plt.loglog(x, y, ls=ls, label=label)
+
 plt.xlabel('Loss Probability')
 plt.ylabel('Fidelity')
-plt.title('Fidelity vs Channel Loss for Different Encodings')
-
-# Place legend outside if it gets too crowded
+plt.title('Fidelity vs Channel Loss (Log–Log)')
 plt.legend()
 plt.grid(True, which="both", ls="--", alpha=0.6)
+
+# ------------------------
+# Linear Plot
+plt.figure()
+for x, y, ls, label in results:
+    plt.plot(x, y, ls=ls, label=label)
+
+plt.xlabel('Loss Probability')
+plt.ylabel('Fidelity')
+plt.title('Fidelity vs Channel Loss (Linear Scale)')
+plt.legend()
+plt.grid(True, ls="--", alpha=0.6)
 
 plt.show()
