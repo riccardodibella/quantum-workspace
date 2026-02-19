@@ -11,6 +11,7 @@ import qutip as qt
 import qutip.qip
 from enum import Enum
 from math import factorial
+from itertools import product
 
 # set a parameter to see animations in line
 from matplotlib import rc
@@ -129,14 +130,16 @@ class StateManager:
         print(f"Raw dict: {self.state_index_dict}")
         print("---------------------------------------\n")
     
-    @profile
     def apply_operation(self, system_index: int, operator: qt.Qobj) -> None:
         system = self.systems_list[system_index]
         if system.isket:
             system = (operator @ system).unit()
         else:
             system = operator @ system @ operator.dag()
-            system = system / system.tr()
+            tr = system.tr()
+            if(np.abs(tr) < 1E-5):
+                tr = 1E-5
+            system = system / tr
         self.systems_list[system_index] = system
 
 
@@ -616,6 +619,18 @@ def apply_x(sm: StateManager, target_key: str):
     X_total = qt.tensor(*op_list)
     sm.apply_operation(system_index, X_total)
 
+def apply_z(sm: StateManager, target_key: str):
+    system_index, target_idx = sm.state_index_dict[target_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    
+    op_list = [qt.qeye(d) for d in dims]
+    op_list[target_idx] = qt.sigmaz()
+    
+    Z_total = qt.tensor(*op_list)
+    sm.apply_operation(system_index, Z_total)
+
 def apply_hadamard(sm: StateManager, target_key: str):
     system_index, target_idx = sm.state_index_dict[target_key]
 
@@ -651,6 +666,32 @@ def apply_cnot(sm: StateManager, control_key: str, target_key: str):
     
     CNOT_total = qt.tensor(*op_list_0) + qt.tensor(*op_list_1)
     sm.apply_operation(system_index, CNOT_total)
+
+# def apply_cz(sm: StateManager, control_key: str, target_key: str):
+#     apply_hadamard(sm, target_key)
+#     apply_cnot(sm, control_key, target_key)
+#     apply_hadamard(sm, target_key)
+
+def apply_cz(sm: StateManager, control_key: str, target_key: str):
+    sm.ensure_same_system(control_key, target_key)
+
+    system_index, control_idx = sm.state_index_dict[control_key]
+    _, target_idx = sm.state_index_dict[target_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+
+    # Control in |0>
+    op_list_0 = [qt.qeye(d) for d in dims]
+    op_list_0[control_idx] = qt.basis(2, 0).proj()
+
+    # Control in |1>
+    op_list_1 = [qt.qeye(d) for d in dims]
+    op_list_1[control_idx] = qt.basis(2, 1).proj()
+    op_list_1[target_idx] = qt.sigmaz()
+
+    CZ_total = qt.tensor(*op_list_0) + qt.tensor(*op_list_1)
+    sm.apply_operation(system_index, CZ_total)
 
     
 def apply_swap(sm: StateManager, key1: str, key2: str):
@@ -700,6 +741,171 @@ def swap_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
 def swap_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
     apply_swap(sm, source_key_list[0], target_key)
 
+def steane_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
+    # Fig. 13 of https://doi.org/10.1109/MCAS.2024.3349668
+
+    apply_swap(sm, source_key, target_key_list[0])
+
+    q = target_key_list
+    apply_hadamard(sm, q[4])
+    apply_hadamard(sm, q[5])
+    apply_hadamard(sm, q[6])
+    
+    apply_cnot(sm, q[0], q[3])
+    apply_cnot(sm, q[0], q[2])
+    apply_cnot(sm, q[6], q[3])
+    apply_cnot(sm, q[6], q[2])
+    apply_cnot(sm, q[6], q[1])
+    apply_cnot(sm, q[5], q[3])
+    apply_cnot(sm, q[5], q[1])
+    apply_cnot(sm, q[5], q[0])
+    apply_cnot(sm, q[4], q[2])
+    apply_cnot(sm, q[4], q[1])
+    apply_cnot(sm, q[4], q[0])
+
+
+
+@profile
+def steane_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    # Fig. 14 of https://doi.org/10.1109/MCAS.2024.3349668
+
+    anc_keys: list[str] = [f"steane_anc_{i}" for i in range(6)]
+    for k in anc_keys:
+        sm.add_subsystem(2, k)
+    
+    for k in anc_keys:
+        apply_hadamard(sm, k)
+
+    m = anc_keys
+    q = source_key_list
+
+    apply_cnot(sm, m[5], q[6])
+    apply_cnot(sm, m[5], q[3])
+    apply_cnot(sm, m[5], q[2])
+    apply_cnot(sm, m[5], q[1])
+
+    apply_cnot(sm, m[4], q[5])
+    apply_cnot(sm, m[4], q[3])
+    apply_cnot(sm, m[4], q[1])
+    apply_cnot(sm, m[4], q[0])
+
+    apply_cnot(sm, m[3], q[4])
+    apply_cnot(sm, m[3], q[2])
+    apply_cnot(sm, m[3], q[1])
+    apply_cnot(sm, m[3], q[0])
+
+    apply_cz(sm, m[2], q[6])
+    apply_cz(sm, m[2], q[3])
+    apply_cz(sm, m[2], q[2])
+    apply_cz(sm, m[2], q[1])
+
+    apply_cz(sm, m[1], q[5])
+    apply_cz(sm, m[1], q[3])
+    apply_cz(sm, m[1], q[1])
+    apply_cz(sm, m[1], q[0])
+
+    apply_cz(sm, m[0], q[4])
+    apply_cz(sm, m[0], q[2])
+    apply_cz(sm, m[0], q[1])
+    apply_cz(sm, m[0], q[0])
+
+    for k in anc_keys:
+        apply_hadamard(sm, k)
+
+
+    possible_outcomes = list(product([0, 1], repeat=6))
+
+    new_systems_list: list[qt.Qobj] = []
+    for outcome_i in range(len(possible_outcomes)):
+        outcome = possible_outcomes[outcome_i]
+        sm_probe = sm.clone()
+        outcome_probability = 1.0
+        for i, bit in enumerate(outcome):
+            sub_dm = sm_probe.clone().ptrace_keep([anc_keys[i]], force_density_matrix=True)
+            p = sub_dm[bit, bit].real
+            outcome_probability *= p
+            sm_probe.measure_subsystem(anc_keys[i], bit)
+            sm_probe.ptrace_subsystem(anc_keys[i])
+
+        #print(f"{outcome}: {outcome_probability}")
+
+        sm_outcome = sm.clone()
+        for i in range(len(outcome)):
+            sm_outcome.measure_subsystem(anc_keys[i], outcome[i])
+            sm_outcome.ptrace_subsystem(anc_keys[i])
+
+        x_bits = (outcome[0], outcome[1], outcome[2])
+        z_bits = (outcome[3], outcome[4], outcome[5])
+
+        if x_bits == (0,0,0):
+            pass
+        elif x_bits == (1,0,0):
+            apply_x(sm_outcome, q[6])
+        elif x_bits == (0,1,0):
+            apply_x(sm_outcome, q[5])
+        elif x_bits == (0,0,1):
+            apply_x(sm_outcome, q[4])
+        elif x_bits == (1,1,0):
+            apply_x(sm_outcome, q[3])
+        elif x_bits == (1,0,1):
+            apply_x(sm_outcome, q[2])
+        elif x_bits == (0,1,1):
+            apply_x(sm_outcome, q[1])
+        elif x_bits == (1,1,1):
+            apply_x(sm_outcome, q[0])
+
+        if z_bits == (0,0,0):
+            pass
+        elif z_bits == (1,0,0):
+            apply_z(sm_outcome, q[6])
+        elif z_bits == (0,1,0):
+            apply_z(sm_outcome, q[5])
+        elif z_bits == (0,0,1):
+            apply_z(sm_outcome, q[4])
+        elif z_bits == (1,1,0):
+            apply_z(sm_outcome, q[3])
+        elif z_bits == (1,0,1):
+            apply_z(sm_outcome, q[2])
+        elif z_bits == (0,1,1):
+            apply_z(sm_outcome, q[1])
+        elif z_bits == (1,1,1):
+            apply_z(sm_outcome, q[0])
+
+        
+        if outcome_i == 0:
+            for sys in sm_outcome.systems_list:
+                n = sys.shape[0] 
+                new_systems_list.append(qt.Qobj(np.zeros((n, n)), dims=[sys.dims[0], sys.dims[0]]))
+        new_state_index_dict = sm_outcome.state_index_dict
+        
+        for i in range(len(sm_outcome.systems_list)):
+            branch_state = sm_outcome.systems_list[i]
+            
+            dm_to_add = qt.ket2dm(branch_state) if branch_state.isket else branch_state
+            
+            new_systems_list[i] += outcome_probability * dm_to_add
+    
+    sm.systems_list = new_systems_list
+    sm.state_index_dict = new_state_index_dict.copy()
+
+    apply_cnot(sm, q[4], q[0])
+    apply_cnot(sm, q[4], q[1])
+    apply_cnot(sm, q[4], q[2])
+    apply_cnot(sm, q[5], q[0])
+    apply_cnot(sm, q[5], q[1])
+    apply_cnot(sm, q[5], q[3])
+    apply_cnot(sm, q[6], q[1])
+    apply_cnot(sm, q[6], q[2])
+    apply_cnot(sm, q[6], q[3])
+    apply_cnot(sm, q[0], q[2])
+    apply_cnot(sm, q[0], q[3])
+    apply_hadamard(sm, q[4])
+    apply_hadamard(sm, q[5])
+    apply_hadamard(sm, q[6])
+
+    apply_swap(sm, source_key_list[0], target_key)
+
+
 def repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
     apply_swap(sm, source_key, target_key_list[0])
     for i in range(1, len(target_key_list)):
@@ -707,7 +913,7 @@ def repetition_encode(sm: StateManager, source_key: str, target_key_list: list[s
         apply_cnot(sm, target_key_list[0], target_key)
 
 def repetition_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
-    return repetition_decode_mod(sm, target_key, source_key_list)
+    #return repetition_decode_mod(sm, target_key, source_key_list)
     if len(source_key_list) == 3:
         for i in range(1, len(source_key_list)):
             apply_cnot(sm, source_key_list[0], source_key_list[i])
@@ -718,7 +924,6 @@ def repetition_decode(sm: StateManager, target_key: str, source_key_list: list[s
     apply_swap(sm, source_key_list[0], target_key)
 
 
-@profile
 def repetition_decode_mod(sm: StateManager, target_key: str, source_key_list: list[str]):
     if len(source_key_list) != 3:
         print("unsupported repetition decoding (mod) for n != 3")
@@ -908,6 +1113,7 @@ class EncodingType(Enum):
     SHOR_9_QUBITS = 4
     REPETITION_BIT_FLIP_WRAP = 5
     REPETITION_PHASE_FLIP_WRAP = 6
+    STEANE_7_QUBITS = 7
 
 def generic_encode(sm: StateManager, source_key: str, target_key_list: list[str], encoding: EncodingType):
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
@@ -922,6 +1128,8 @@ def generic_encode(sm: StateManager, source_key: str, target_key_list: list[str]
         wrap_repetition_encode(sm, source_key, target_key_list)
     elif encoding is EncodingType.REPETITION_PHASE_FLIP_WRAP:
         phase_wrap_repetition_encode(sm, source_key, target_key_list)
+    elif encoding is EncodingType.STEANE_7_QUBITS:
+        steane_encode(sm, source_key, target_key_list)
 
 def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str], encoding: EncodingType):
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
@@ -936,6 +1144,8 @@ def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str]
         wrap_repetition_decode(sm, target_key, source_key_list)
     elif encoding is EncodingType.REPETITION_PHASE_FLIP_WRAP:
         phase_wrap_repetition_decode(sm, target_key, source_key_list)
+    elif encoding is EncodingType.STEANE_7_QUBITS:
+        steane_decode(sm, target_key, source_key_list)
 
 
 ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
@@ -946,7 +1156,6 @@ ideal_rho = qt.ket2dm(ideal_phi_plus)
 
 
 
-@profile
 def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHANNEL_QUBITS: int, encoding_type: EncodingType) -> float:
     N = ph.N
 
@@ -1025,50 +1234,55 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     (
         PhyLayerConfiguration(channel_type=ChannelType.CV_KITTEN, N=5), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_PHASE_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
-            (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            #(EncodingType.REPETITION_PHASE_FLIP, 3),
+            #(EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.STEANE_7_QUBITS, 7),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT, N=18, vertical_displacement=1.5), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
-            (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            #(EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.STEANE_7_QUBITS, 7),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT_4, N=20, alpha=1.5), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_PHASE_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
-            (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            #(EncodingType.REPETITION_PHASE_FLIP, 3),
+            #(EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.STEANE_7_QUBITS, 7),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.STEANE_7_QUBITS, 7),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.DV_DUAL_MODE_MIXED), 
         [
             (EncodingType.SWAP_DUMMY_ENCODING, 1),
+            (EncodingType.REPETITION_BIT_FLIP, 3),
             (EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.STEANE_7_QUBITS, 7),
         ]
     ),
 ]
 
-loss_prob_list = list(np.logspace(np.log10(0.05), np.log10(0.8), num=2)) + list(np.linspace(0.81, 0.99, 2))
-print(loss_prob_list)
+loss_prob_list = list(np.logspace(np.log10(0.01), np.log10(0.8), num=5)) + list(np.linspace(0.81, 0.99, 2))
 
 # Define line styles for different physical layers to distinguish them
 styles = {
