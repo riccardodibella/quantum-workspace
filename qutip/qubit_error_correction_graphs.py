@@ -138,6 +138,42 @@ class StateManager:
         self.systems_list[system_index] = system
 
 
+    def measure_subsystem(self, key: str, outcome: int) -> None:
+        """
+        Applies a projective measurement to the subsystem identified by 'key'.
+        Updates the system state and normalizes it.
+        """
+        if key not in self.state_index_dict:
+            raise ValueError(f"Key '{key}' not found in StateManager.")
+
+        system_index, target_sub_idx = self.state_index_dict[key]
+        state = self.systems_list[system_index]
+        
+        # 1. Get dimensions of the specific system containing the target
+        # QuTiP dims are nested lists, e.g., [[2, 2, 2], [2, 2, 2]]
+        dims = state.dims[0]
+        
+        # 2. Build the operator list (Identity for all, Projector for target)
+        op_list = [qt.qeye(d) for d in dims]
+        # Create projector |outcome><outcome|
+        op_list[target_sub_idx] = qt.basis(dims[target_sub_idx], outcome).proj()
+        
+        # 3. Create the full-system projector
+        projector = qt.tensor(*op_list)
+        
+        # 4. Apply the measurement
+        # If it's a Ket: P|psi> / norm
+        # If it's a Density Matrix: P rho P / trace(P rho P)
+        if state.isket:
+            new_state = (projector @ state).unit()
+        else:
+            # For DMs, we apply P * rho * P (since P is Hermitian, P.dag() = P)
+            new_state = projector @ state @ projector
+            new_state = new_state / new_state.tr()
+            
+        self.systems_list[system_index] = new_state
+
+
 def apply_dual_mode_encoding(sm: StateManager, qubit_key: str, mode_1_key: str, mode_2_key: str):
     assert mode_1_key != mode_2_key
     apply_x(sm, mode_1_key)
@@ -684,13 +720,96 @@ def repetition_encode(sm: StateManager, source_key: str, target_key_list: list[s
         apply_cnot(sm, target_key_list[0], target_key)
 
 def repetition_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    #return repetition_decode_mod(sm, target_key, source_key_list)
     if len(source_key_list) == 3:
         for i in range(1, len(source_key_list)):
             apply_cnot(sm, source_key_list[0], source_key_list[i])
         apply_toffoli(sm, source_key_list[1], source_key_list[2], source_key_list[0])
     else:
-        print("unsupported decoding for n != 3")
+        print("unsupported repetition decoding for n != 3")
         exit()
+    apply_swap(sm, source_key_list[0], target_key)
+
+
+def repetition_decode_mod(sm: StateManager, target_key: str, source_key_list: list[str]):
+    if len(source_key_list) != 3:
+        print("unsupported repetition decoding (mod) for n != 3")
+        exit()
+    
+    anc_1_key = "rdm_anc_1"
+    anc_2_key = "rdm_anc_2"
+
+    sm.add_subsystem(2, anc_1_key)
+    sm.add_subsystem(2, anc_2_key)
+
+    apply_cnot(sm, source_key_list[0], anc_1_key)
+    apply_cnot(sm, source_key_list[1], anc_1_key)
+    apply_cnot(sm, source_key_list[1], anc_2_key)
+    apply_cnot(sm, source_key_list[2], anc_2_key)
+
+    sm_anc = sm.clone()
+    ancilla_dm = sm_anc.ptrace_keep([anc_1_key, anc_2_key], force_density_matrix=True)
+
+    possible_outcomes = [(0,0), (0, 1), (1, 0), (1, 1)]
+
+    conditioned_states: list[tuple[float, StateManager]] = []
+
+    for outcome_i in range(len(possible_outcomes)):
+        outcome = possible_outcomes[outcome_i]
+        outcome_probability: complex = ancilla_dm[outcome_i, outcome_i]
+        outcome_probability = outcome_probability.real
+
+        sm_outcome = sm.clone()
+        sm_outcome.measure_subsystem(anc_1_key, outcome[0])
+        sm_outcome.ptrace_subsystem(anc_1_key)
+        sm_outcome.measure_subsystem(anc_2_key, outcome[1])
+        sm_outcome.ptrace_subsystem(anc_2_key)
+
+        if outcome == (0,0):
+            pass
+        elif outcome == (1, 0):
+            apply_x(sm_outcome, source_key_list[0])
+        elif outcome == (1, 1):
+            apply_x(sm_outcome, source_key_list[1])
+        elif outcome == (0, 1):
+            apply_x(sm_outcome, source_key_list[2])
+        
+        conditioned_states += [(outcome_probability, sm_outcome)]
+        
+    
+    # # Ensure that all the state managers have identical keys, indices and dimensions
+    # for _, sm_i in conditioned_states:
+    #     assert(sm_i.state_index_dict == conditioned_states[0][1].state_index_dict)
+
+    #     a_list = sm_i.systems_list
+    #     b_list = conditioned_states[0][1].systems_list
+
+    #     assert len(a_list) == len(b_list)
+    #     for a_el, b_el in zip(a_list, b_list):
+    #         assert a_el.shape == b_el.shape
+    
+    # Now I want the new state to be a "weighted sum" of the states conditioned on the outcomes, using as weights the probabilities
+
+    new_systems_list: list[qt.Qobj] = []
+    for sys in conditioned_states[0][1].systems_list:
+        n = sys.shape[0] 
+        new_systems_list.append(qt.Qobj(np.zeros((n, n)), dims=[sys.dims[0], sys.dims[0]]))
+
+    for prob, sm_branch in conditioned_states:
+        for i in range(len(sm_branch.systems_list)):
+            branch_state = sm_branch.systems_list[i]
+            
+            dm_to_add = qt.ket2dm(branch_state) if branch_state.isket else branch_state
+            
+            new_systems_list[i] += prob * dm_to_add
+
+    sm.systems_list = new_systems_list
+    sm.state_index_dict = conditioned_states[0][1].state_index_dict.copy()
+
+    for i in range(1, len(source_key_list)):
+        # Reset all qubits apart from the first to |0>
+        apply_cnot(sm, source_key_list[0], source_key_list[i])
+
     apply_swap(sm, source_key_list[0], target_key)
 
 def phase_repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
@@ -932,44 +1051,44 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     (
         PhyLayerConfiguration(channel_type=ChannelType.CV_KITTEN, N=5), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_PHASE_FLIP, 3),
+            #(EncodingType.REPETITION_PHASE_FLIP, 3),
             (EncodingType.SHOR_9_QUBITS, 9),
-            (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT, N=18, vertical_displacement=1.5), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
-            (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT_4, N=20, alpha=1.5), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_PHASE_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
-            (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+            #(EncodingType.REPETITION_PHASE_FLIP, 3),
+            #(EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.SHOR_9_QUBITS, 9),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.DV_DUAL_MODE_MIXED), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.SHOR_9_QUBITS, 9),
         ]
     ),
 ]
@@ -1029,7 +1148,7 @@ for x, y, ls, label in results:
 
 plt.xlabel('Loss Probability')
 plt.ylabel('Fidelity')
-plt.title('Fidelity vs Channel Loss (Log–Log)')
+plt.title('Fidelity vs Channel Loss (Log-Log)')
 plt.legend()
 plt.grid(True, which="both", ls="--", alpha=0.6)
 
