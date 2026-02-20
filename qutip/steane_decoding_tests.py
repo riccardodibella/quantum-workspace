@@ -1,57 +1,69 @@
 # pyright: basic
 
-# https://claude.ai/share/41de830c-4b8f-4c4e-8b8b-6b536631ef1d
-
 from dataclasses import dataclass
 import inspect
 from typing import Self, cast
 from line_profiler import profile
+import matplotlib.pyplot as plt
 import numpy as np
+from IPython.display import Image
 import qutip as qt
 import qutip.qip
+from enum import Enum
 from math import factorial
 from itertools import product
 
+# set a parameter to see animations in line
+from matplotlib import rc
+rc('animation', html='jshtml')
 
-# ─────────────────────────────────────────────────────────────────────────────
-# StateManager
-# ─────────────────────────────────────────────────────────────────────────────
+# static image plots
+# %matplotlib inline
+# interactive 3D plots
+# %matplotlib widget
+
+
+
+
+
 
 class StateManager:
     def __init__(self):
         self.systems_list: list[qt.Qobj] = []
+
+        # first index is system (entry of systems_list), second index is subsystem within that systems_list entry
         self.state_index_dict: dict[str, tuple[int, int]] = {}
 
     def add_subsystem(self, dimensions: int, key: str) -> None:
+        # when we add a new subsystem, it will always be alone in a new independent system
+
         new_system = qt.basis(dimensions, 0)
         system_index = len(self.systems_list)
         self.systems_list += [new_system]
         self.state_index_dict[key] = (system_index, 0)
-
+    
     def get_system_subsystems_count(self, system_index: int) -> int:
         count = 0
         for (sys_idx, sub_idx) in self.state_index_dict.values():
             if sys_idx == system_index:
                 count += 1
         return count
-
+        
     def ptrace_subsystem(self, key: str) -> None:
         system_index, target_subsystem_index = self.state_index_dict[key]
         prev_subsystem_count = self.get_system_subsystems_count(system_index)
-        self.systems_list[system_index] = self.systems_list[system_index].ptrace(
-            [i for i in range(prev_subsystem_count) if i != target_subsystem_index]
-        )
+        self.systems_list[system_index] = self.systems_list[system_index].ptrace([i for i in range(prev_subsystem_count) if i != target_subsystem_index])
         del self.state_index_dict[key]
-        if prev_subsystem_count > 1:
+        if(prev_subsystem_count > 1):
             for k, (v_sys, v_sub) in self.state_index_dict.items():
                 if v_sys == system_index and v_sub > target_subsystem_index:
-                    self.state_index_dict[k] = (system_index, v_sub - 1)
+                    self.state_index_dict[k] = (system_index, v_sub-1)
         else:
             self.systems_list.pop(system_index)
             for k, (v_sys, v_sub) in self.state_index_dict.items():
                 if v_sys > system_index:
                     self.state_index_dict[k] = (v_sys - 1, v_sub)
-
+        
     def merge_systems(self, sys1: int, sys2: int) -> None:
         if sys2 < sys1:
             sys1, sys2 = sys2, sys1
@@ -68,16 +80,16 @@ class StateManager:
         self.systems_list.pop(sys2)
         for k, (v_sys, v_sub) in self.state_index_dict.items():
             if v_sys == sys2:
-                self.state_index_dict[k] = (sys1, subsystem_count_1 + v_sub)
+                self.state_index_dict[k] = (sys1, subsystem_count_1+v_sub)
             elif v_sys > sys2:
                 self.state_index_dict[k] = (v_sys - 1, v_sub)
 
     def ensure_same_system(self, key1: str, key2: str) -> None:
         sys1, _ = self.state_index_dict[key1]
         sys2, _ = self.state_index_dict[key2]
-        if sys1 != sys2:
+        if(sys1 != sys2):
             self.merge_systems(sys1, sys2)
-
+    
     def ptrace_keep(self, keep_key_list: list[str], force_density_matrix: bool = True) -> qt.Qobj:
         for i in range(1, len(keep_key_list)):
             k = keep_key_list[i]
@@ -91,10 +103,33 @@ class StateManager:
 
     def clone(self) -> Self:
         new_manager = StateManager()
+        # Create a new list with copies of each Qobj
         new_manager.systems_list = [state.copy() for state in self.systems_list]
+        # Copy the dictionary
         new_manager.state_index_dict = self.state_index_dict.copy()
         return cast(Self, new_manager)
 
+    def print_dimensions(self) -> None:
+        print("\n--- Current StateManager Dimensions ---")
+        for sys_idx, system in enumerate(self.systems_list):
+            # QuTiP dims are formatted as [ [subsystem_dims], [subsystem_dims] ]
+            # For a Qobj, dims[0] represents the dimensions of the Hilbert space
+            current_dims = system.dims[0]
+            
+            # Find which keys belong to this system
+            keys_in_system = [
+                f"{k}(sub_idx:{sub})" 
+                for k, (s_idx, sub) in self.state_index_dict.items() 
+                if s_idx == sys_idx
+            ]
+            
+            type_str = "Ket" if system.isket else "Density Matrix"
+            print(f"System {sys_idx} ({type_str}):")
+            print(f"  Dimensions: {current_dims}")
+            print(f"  Keys: {', '.join(keys_in_system)}")
+        print(f"Raw dict: {self.state_index_dict}")
+        print("---------------------------------------\n")
+    
     def apply_operation(self, system_index: int, operator: qt.Qobj) -> None:
         system = self.systems_list[system_index]
         if system.isket:
@@ -102,117 +137,31 @@ class StateManager:
         else:
             system = operator @ system @ operator.dag()
             tr = system.tr()
-            if np.abs(tr) < 1E-5:
+            if(np.abs(tr) < 1E-5):
                 tr = 1E-5
             system = system / tr
         self.systems_list[system_index] = system
 
+
     def measure_subsystem(self, key: str, outcome: int) -> None:
+        """
+        Applies a projective measurement to the subsystem identified by 'key'.
+        Updates the system state and normalizes it.
+        """
         if key not in self.state_index_dict:
             raise ValueError(f"Key '{key}' not found in StateManager.")
+
         system_index, target_sub_idx = self.state_index_dict[key]
         state = self.systems_list[system_index]
+        
         dims = state.dims[0]
+        
         op_list = [qt.qeye(d) for d in dims]
         op_list[target_sub_idx] = qt.basis(dims[target_sub_idx], outcome).proj()
+        
         projector = qt.tensor(*op_list)
+        
         self.apply_operation(system_index, projector)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Primitive gates
-# ─────────────────────────────────────────────────────────────────────────────
-
-def apply_x(sm: StateManager, target_key: str):
-    system_index, target_idx = sm.state_index_dict[target_key]
-    system = sm.systems_list[system_index]
-    dims = system.dims[0]
-    op_list = [qt.qeye(d) for d in dims]
-    op_list[target_idx] = qt.gates.sigmax()
-    sm.apply_operation(system_index, qt.tensor(*op_list))
-
-def apply_z(sm: StateManager, target_key: str):
-    system_index, target_idx = sm.state_index_dict[target_key]
-    system = sm.systems_list[system_index]
-    dims = system.dims[0]
-    op_list = [qt.qeye(d) for d in dims]
-    op_list[target_idx] = qt.sigmaz()
-    sm.apply_operation(system_index, qt.tensor(*op_list))
-
-def apply_hadamard(sm: StateManager, target_key: str):
-    system_index, target_idx = sm.state_index_dict[target_key]
-    system = sm.systems_list[system_index]
-    dims = system.dims[0]
-    op_list = [qt.qeye(d) for d in dims]
-    op_list[target_idx] = qt.gates.snot()
-    sm.apply_operation(system_index, qt.tensor(*op_list))
-
-def apply_cnot(sm: StateManager, control_key: str, target_key: str):
-    sm.ensure_same_system(control_key, target_key)
-    system_index, control_idx = sm.state_index_dict[control_key]
-    _, target_idx = sm.state_index_dict[target_key]
-    system = sm.systems_list[system_index]
-    dims = system.dims[0]
-    op_list_0 = [qt.qeye(d) for d in dims]
-    op_list_0[control_idx] = qt.basis(2, 0).proj()
-    op_list_1 = [qt.qeye(d) for d in dims]
-    op_list_1[control_idx] = qt.basis(2, 1).proj()
-    op_list_1[target_idx] = qt.sigmax()
-    sm.apply_operation(system_index, qt.tensor(*op_list_0) + qt.tensor(*op_list_1))
-
-def apply_cz(sm: StateManager, control_key: str, target_key: str):
-    sm.ensure_same_system(control_key, target_key)
-    system_index, control_idx = sm.state_index_dict[control_key]
-    _, target_idx = sm.state_index_dict[target_key]
-    system = sm.systems_list[system_index]
-    dims = system.dims[0]
-    op_list_0 = [qt.qeye(d) for d in dims]
-    op_list_0[control_idx] = qt.basis(2, 0).proj()
-    op_list_1 = [qt.qeye(d) for d in dims]
-    op_list_1[control_idx] = qt.basis(2, 1).proj()
-    op_list_1[target_idx] = qt.sigmaz()
-    sm.apply_operation(system_index, qt.tensor(*op_list_0) + qt.tensor(*op_list_1))
-
-def apply_swap(sm: StateManager, key1: str, key2: str):
-    if key1 == key2:
-        return
-    apply_cnot(sm, key1, key2)
-    apply_cnot(sm, key2, key1)
-    apply_cnot(sm, key1, key2)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Channel noise + dual-mode mixed PHY layer
-# ─────────────────────────────────────────────────────────────────────────────
-
-def apply_kraus_loss(sm: StateManager, key: str, loss_prob: float, k_max: int | None = None):
-    system_index, local_idx = sm.state_index_dict[key]
-    system = sm.systems_list[system_index]
-    if system.isket:
-        system = qt.ket2dm(system)
-    dims = system.dims[0]
-    N = dims[local_idx]
-    assert isinstance(N, int)
-    eta = 1.0 - loss_prob
-    if k_max is None:
-        k_max = N - 1
-    a = qt.destroy(N)
-    n = a.dag() @ a
-    eta_n: qt.Qobj = (0.5 * np.log(eta) * n).expm()
-    id_ops = [qt.qeye(d) for d in dims]
-    rho_out = 0 * system
-    for k in range(k_max + 1):
-        Ak_local = (
-            ((1 - eta) ** (k / 2))
-            / np.sqrt(float(factorial(k)))
-            * eta_n
-            * (a ** k)
-        )
-        op_list = id_ops.copy()
-        op_list[local_idx] = Ak_local
-        K = qt.tensor(*op_list)
-        rho_out += K @ system @ K.dag()
-    sm.systems_list[system_index] = rho_out
 
 
 def apply_dual_mode_encoding(sm: StateManager, qubit_key: str, mode_1_key: str, mode_2_key: str):
@@ -224,48 +173,553 @@ def apply_dual_mode_encoding(sm: StateManager, qubit_key: str, mode_1_key: str, 
 
 def apply_dual_mode_decoding_mixed(sm: StateManager, qubit_key: str, mode_1_key: str, mode_2_key: str):
     assert mode_1_key != mode_2_key
-    anc_key = f"dual_mode_decoding_ancilla"
+
+    anc_key = f"{inspect.currentframe().f_code.co_name} ancilla" # type: ignore
     sm.add_subsystem(2, anc_key)
     apply_cnot(sm, mode_1_key, anc_key)
     apply_cnot(sm, mode_2_key, anc_key)
-    # Discard ancilla — decode regardless of photon-loss outcome
-    sm.ptrace_subsystem(anc_key)
+    # We don't care about the ancilla and we decode regardless
+    # If a photon was lost we will arrive at some mixed state after the ptraces, but in this decoding we don't care 
+    sm.ptrace_subsystem(anc_key) 
+
     apply_cnot(sm, mode_2_key, qubit_key)
     apply_cnot(sm, mode_2_key, mode_1_key)
     apply_cnot(sm, qubit_key, mode_2_key)
-    apply_x(sm, mode_1_key)
+    apply_x(sm, mode_1_key) 
 
-
-def apply_dual_mode_mixed_channel(sm: StateManager, tx_key: str, rx_key: str, loss_prob: float):
+def apply_single_mode_encoding(sm: StateManager, qubit_key: str, cv_key: str):
     """
-    Sends qubit `tx_key` through the dual-mode mixed PHY channel:
-      encode into two modes → Kraus loss on each mode → mixed decode into `rx_key`.
-    Both modes are dim-2 (single-photon subspace).
+    Maps a qubit state to the first two Fock states of a CV mode.
+    |0>_q |vac>_cv -> |0>_q |0>_cv
+    |1>_q |vac>_cv -> |0>_q |1>_cv
     """
-    mode_1_key = f"{tx_key}_m1"
-    mode_2_key = f"{tx_key}_m2"
-    sm.add_subsystem(2, mode_1_key)
-    sm.add_subsystem(2, mode_2_key)
-    apply_dual_mode_encoding(sm, tx_key, mode_1_key, mode_2_key)
-    sm.ptrace_subsystem(tx_key)
-    apply_kraus_loss(sm, mode_1_key, loss_prob)
-    apply_kraus_loss(sm, mode_2_key, loss_prob)
-    apply_dual_mode_decoding_mixed(sm, rx_key, mode_1_key, mode_2_key)
-    sm.ptrace_subsystem(mode_1_key)
-    sm.ptrace_subsystem(mode_2_key)
+    sm.ensure_same_system(qubit_key, cv_key)
+    system_index, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    N_cv = dims[cv_pos]
+    assert type(N_cv) is int
+
+    # Operators for CV mode
+    # Map qubit |0> to CV |0> (Identity on CV if CV starts in vacuum)
+    # Map qubit |1> to CV |1> (Creation operator on CV)
+    
+    # We use projectors to define the mapping
+    # Projector for qubit |0> and leave CV as is (assuming vacuum)
+    op0 = [qt.qeye(d) for d in dims]
+    op0[qubit_pos] = qt.basis(2, 0).proj()
+    # op0[cv_pos] is already identity
+    
+    # Projector for qubit |1> and create a photon in CV, then flip qubit to 0
+    op1 = [qt.qeye(d) for d in dims]
+    op1[qubit_pos] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
+    op1[cv_pos] = qt.create(N_cv) 
+
+    U_encode = qt.tensor(*op0) + qt.tensor(*op1)
+
+    sm.apply_operation(system_index, U_encode)
+
+def apply_single_mode_decoding(sm: StateManager, qubit_key: str, cv_key: str):
+    """
+    The inverse of encoding: transfers the Fock state back to the qubit.
+    |0>_cv -> |0>_q
+    |1>_cv -> |1>_q
+    """
+    sm.ensure_same_system(qubit_key, cv_key)
+    system_index, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    N_cv = dims[cv_pos]
+
+    # Map CV |0> to qubit |0>
+    op0 = [qt.qeye(d) for d in dims]
+    op0[qubit_pos] = qt.basis(2, 0).proj()
+    op0[cv_pos] = qt.basis(N_cv, 0).proj()
+
+    # Map CV |1> to qubit |1>
+    op1 = [qt.qeye(d) for d in dims]
+    op1[qubit_pos] = qt.basis(2, 1) @ qt.basis(2, 0).dag()
+    op1[cv_pos] = qt.basis(2, 0) @ qt.basis(N_cv, 1).dag() # Map Fock 1 to Fock 0
+
+    U_decode = qt.tensor(*op0) + qt.tensor(*op1)
+
+    sm.apply_operation(system_index, U_decode)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Steane encode
-# ─────────────────────────────────────────────────────────────────────────────
+def apply_cat_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, vertical_displacement: float, N: int):
+    # 1. Prepare CV states
+    vacuum = qt.basis(N, 0)
+    alpha_coeff = (vertical_displacement / np.sqrt(2)) * 1j
+    
+    pos_disp = qt.displace(N, alpha_coeff)
+    neg_disp = qt.displace(N, -alpha_coeff)
+    
+    logical_zero = (pos_disp @ vacuum + neg_disp @ vacuum).unit()
+    logical_one  = (pos_disp @ vacuum - neg_disp @ vacuum).unit()
+    
+    # Define the mapping operators for the CV mode
+    map_zero = logical_zero @ vacuum.dag()
+    map_one  = logical_one @ vacuum.dag()
+
+    # 2. Build the operator list for the tensor product
+    sm.ensure_same_system(qubit_key, cv_key)
+    system_index, qubit_position = sm.state_index_dict[qubit_key]
+    _, cv_position = sm.state_index_dict[cv_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    num_subsystems = len(dims)
+
+    def build_gate(qubit_state_index: int) -> qt.Qobj:
+        op_list = [qt.qeye(dims[i]) for i in range(num_subsystems)]
+        
+        if qubit_state_index == 0:
+            # Map: |0>_q |vac>_cv  ->  |0>_q |cat+>_cv
+            op_list[qubit_position] = qt.basis(2, 0).proj()
+            op_list[cv_position] = map_zero
+        else:
+            # Map: |1>_q |vac>_cv  ->  |0>_q |cat->_cv
+            # We use |0><1| to flip the qubit from 1 to 0 during the transfer
+            op_list[qubit_position] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
+            op_list[cv_position] = map_one
+        
+        return qt.tensor(*op_list)
+
+    # 3. Combine into the full encoding operator
+    U_encode = build_gate(0) + build_gate(1)
+
+    sm.apply_operation(system_index, U_encode)
+
+def apply_ideal_cat_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, vertical_displacement: float, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    system_index, qubit_position = sm.state_index_dict[qubit_key]
+    _, cv_position = sm.state_index_dict[cv_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    
+    # 1. Define states
+    vacuum = qt.basis(N, 0)
+    alpha_coeff = (vertical_displacement / np.sqrt(2)) * 1j
+    
+    # Define logical states for parity detection
+    pos_disp = qt.displace(N, alpha_coeff)
+    neg_disp = qt.displace(N, -alpha_coeff)
+    logical_zero_cv = (pos_disp @ vacuum + neg_disp @ vacuum).unit()
+    logical_one_cv  = (pos_disp @ vacuum - neg_disp @ vacuum).unit()
+
+    # 2. Step A: Parity-Controlled Qubit Flip (The "Decoding")
+    # This maps: |cat+>|0> -> |cat+>|0>  AND  |cat->|0> -> |cat->|1>
+    def build_flip():
+        # Project CV onto Parity, apply corresponding gate to Qubit
+        op_plus = [qt.qeye(d) for d in dims]
+        op_plus[cv_position] = logical_zero_cv.proj()
+        # Qubit stays same (Identity)
+        
+        op_minus = [qt.qeye(d) for d in dims]
+        op_minus[cv_position] = logical_one_cv.proj()
+        op_minus[qubit_position] = qt.sigmax() # Flip if odd parity
+        
+        return qt.tensor(*op_plus) + qt.tensor(*op_minus)
+
+    # 3. Step B: Qubit-Controlled Un-displacement (The "Cleaning")
+    # This returns the CV mode to vacuum: |cat+>|0> -> |vac>|0> AND |cat->|1> -> |vac>|1>
+    # Note: This is essentially the inverse of your encoding function.
+    def build_clean():
+        # This part ensures the operation is unitary by resetting the CV mode
+        op_zero = [qt.qeye(d) for d in dims]
+        op_zero[qubit_position] = qt.basis(2, 0).proj()
+        op_zero[cv_position] = vacuum @ logical_zero_cv.dag()
+        
+        op_one = [qt.qeye(d) for d in dims]
+        op_one[qubit_position] = qt.basis(2, 1).proj()
+        op_one[cv_position] = vacuum @ logical_one_cv.dag()
+        
+        return qt.tensor(*op_zero) + qt.tensor(*op_one)
+
+    # Combined Unitary: First flip the qubit, then clean the CV mode
+    U_total = build_clean() @ build_flip()
+    
+    # Inside apply_ideal_cat_state_decoding:
+    sm.apply_operation(system_index, U_total)
+
+def apply_kitten_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    system_index, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+
+    logical_zero = (qt.basis(N, 0) + qt.basis(N, 4)).unit()
+    logical_one = qt.basis(N, 2)
+
+    map_zero = logical_zero @ qt.basis(N, 0).dag()
+    map_one  = logical_one @ qt.basis(N, 0).dag()
+
+    op0 = [qt.qeye(d) for d in dims]
+    op0[qubit_pos] = qt.basis(2, 0).proj()
+    op0[cv_pos] = map_zero
+
+    op1 = [qt.qeye(d) for d in dims]
+    op1[qubit_pos] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
+    op1[cv_pos] = map_one
+
+    U_encode = qt.tensor(*op0) + qt.tensor(*op1)
+    
+    sm.apply_operation(system_index, U_encode)
+
+def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    anc_key = "parity_ancilla"
+    sm.add_subsystem(2, anc_key)
+    sm.ensure_same_system(cv_key, anc_key)
+    
+    sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    _, anc_pos = sm.state_index_dict[anc_key]
+    
+    system = sm.systems_list[sys_idx]
+    dims = system.dims[0]
+
+    parity_check = 0
+    for n in range(N):
+        proj_n = qt.basis(N, n).proj()
+        op_list = [qt.qeye(d) for d in dims]
+        op_list[cv_pos] = proj_n
+        if n % 2 != 0:
+            op_list[anc_pos] = qt.sigmax()
+        parity_check += qt.tensor(*op_list)
+    parity_check = cast(qt.Qobj, parity_check)
+
+    l0 = (qt.basis(N, 0) + qt.basis(N, 4)).unit()
+    l1 = qt.basis(N, 2)
+
+    a = qt.destroy(N)
+
+    e0 = (a @ l0).unit()
+    e1 = (a @ l1).unit()
+
+    P_l0 = l0 @ l0.dag()
+    P_l1 = l1 @ l1.dag()
+    P_e0 = e0 @ e0.dag()
+    P_e1 = e1 @ e1.dag()
+
+    I_cv = qt.qeye(N)
+    P_sub = P_l0 + P_l1 + P_e0 + P_e1
+    P_perp = I_cv - P_sub
+
+    U_corr_cv = (
+        l0 @ e0.dag()
+        + l1 @ e1.dag()
+        + e0 @ l0.dag()
+        + e1 @ l1.dag()
+        + P_perp
+    )
+
+    op_list_no_err = [qt.qeye(d) for d in dims]
+    op_list_no_err[anc_pos] = qt.basis(2, 0).proj()
+    term_no_err = qt.tensor(*op_list_no_err)
+
+    op_list_err = [qt.qeye(d) for d in dims]
+    op_list_err[anc_pos] = qt.basis(2, 1).proj()
+    op_list_err[cv_pos] = U_corr_cv
+    term_err = qt.tensor(*op_list_err)
+
+    recovery_gate = term_no_err + term_err
+
+    U_correct = recovery_gate @ parity_check
+
+    sm.apply_operation(sys_idx, U_correct)
+    
+    sm.ptrace_subsystem(anc_key)
+
+    sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    system = sm.systems_list[sys_idx]
+    dims = system.dims[0]
+
+    l0 = (qt.basis(N, 0) + qt.basis(N, 4)).unit()
+    l1 = qt.basis(N, 2)
+    vac = qt.basis(N, 0)
+
+    op_map0 = [qt.qeye(d) for d in dims]
+    op_map0[qubit_pos] = qt.basis(2, 0).proj()
+    op_map0[cv_pos] = vac @ l0.dag()
+
+    op_map1 = [qt.qeye(d) for d in dims]
+    op_map1[qubit_pos] = qt.basis(2, 1) @ qt.basis(2, 0).dag()
+    op_map1[cv_pos] = vac @ l1.dag()
+
+    U_decode = qt.tensor(*op_map0) + qt.tensor(*op_map1)
+
+    sm.apply_operation(sys_idx, U_decode)
+
+def apply_4_legged_cat_encoding(sm: StateManager, qubit_key: str, cv_key: str, alpha: complex, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    system_index, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+
+    vac = qt.basis(N, 0)
+    c_p = qt.displace(N, alpha) @ vac # type: ignore
+    c_m = qt.displace(N, -alpha) @ vac # type: ignore
+    c_ip = qt.displace(N, 1j * alpha) @ vac # type: ignore
+    c_im = qt.displace(N, -1j * alpha) @ vac # type: ignore
+
+    logical_zero = (c_p + c_m + c_ip + c_im).unit()
+    logical_one = (c_p + c_m - c_ip - c_im).unit()
+
+    map_zero = logical_zero @ vac.dag()
+    map_one  = logical_one @ vac.dag()
+
+    op0 = [qt.qeye(d) for d in dims]
+    op0[qubit_pos] = qt.basis(2, 0).proj()
+    op0[cv_pos] = map_zero
+
+    op1 = [qt.qeye(d) for d in dims]
+    op1[qubit_pos] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
+    op1[cv_pos] = map_one
+
+    U_encode = qt.tensor(*op0) + qt.tensor(*op1)
+    
+    sm.apply_operation(system_index, U_encode)
+
+def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, alpha: complex, N: int):
+    sm.ensure_same_system(qubit_key, cv_key)
+    anc_key = "cat_decoding_ancilla"
+    sm.add_subsystem(2, anc_key)
+    sm.ensure_same_system(cv_key, anc_key)
+    
+    sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    _, anc_pos = sm.state_index_dict[anc_key]
+    
+    system = sm.systems_list[sys_idx]
+    dims = system.dims[0]
+
+
+    parity_check = 0
+    for n in range(N):
+        proj_n = qt.basis(N, n).proj()
+        op_list = [qt.qeye(d) for d in dims]
+        op_list[cv_pos] = proj_n
+        if n % 2 != 0:
+            op_list[anc_pos] = qt.sigmax()
+        parity_check += qt.tensor(*op_list)
+    parity_check = cast(qt.Qobj, parity_check)
+
+
+    vac = qt.basis(N, 0)
+    l0 = (qt.displace(N, alpha) @ vac + qt.displace(N, -alpha) @ vac + qt.displace(N, 1j*alpha) @ vac + qt.displace(N, -1j*alpha) @ vac).unit() # type: ignore
+    l1 = (qt.displace(N, alpha) @ vac + qt.displace(N, -alpha) @ vac - qt.displace(N, 1j*alpha) @ vac - qt.displace(N, -1j*alpha) @ vac).unit() # type: ignore
+
+    a = qt.destroy(N)
+    e0 = (a @ l0).unit()
+    e1 = (a @ l1).unit()
+
+    P_e0 = e0 @ e0.dag()
+    P_e1 = e1 @ e1.dag()
+    P_l0 = l0 @ l0.dag()
+    P_l1 = l1 @ l1.dag()
+    
+    I_cv = qt.qeye(N)
+    U_corr_cv = (l0 @ e0.dag()) + (l1 @ e1.dag()) + (e0 @ l0.dag()) + (e1 @ l1.dag()) + (I_cv - P_e0 - P_e1 - P_l0 - P_l1)
+
+    op_list_no_err = [qt.qeye(d) for d in dims]
+    op_list_no_err[anc_pos] = qt.basis(2, 0).proj()
+    
+    op_list_err = [qt.qeye(d) for d in dims]
+    op_list_err[anc_pos] = qt.basis(2, 1).proj()
+    op_list_err[cv_pos] = U_corr_cv
+    
+    recovery_gate = qt.tensor(*op_list_no_err) + qt.tensor(*op_list_err)
+    U_total = recovery_gate @ parity_check
+
+    sm.apply_operation(sys_idx, U_total)
+    
+    sm.ptrace_subsystem(anc_key)
+
+    sys_idx, qubit_pos = sm.state_index_dict[qubit_key]
+    _, cv_pos = sm.state_index_dict[cv_key]
+    system = sm.systems_list[sys_idx]
+    dims = system.dims[0]
+
+    op_map0 = [qt.qeye(d) for d in dims]
+    op_map0[qubit_pos] = qt.basis(2, 0).proj()
+    op_map0[cv_pos] = vac @ l0.dag()
+
+    op_map1 = [qt.qeye(d) for d in dims]
+    op_map1[qubit_pos] = qt.basis(2, 1) @ qt.basis(2, 0).dag()
+    op_map1[cv_pos] = vac @ l1.dag()
+
+    U_decode = qt.tensor(*op_map0) + qt.tensor(*op_map1)
+
+    sm.apply_operation(sys_idx, U_decode)
+
+def apply_kraus_loss(
+    sm: StateManager,
+    key: str,
+    loss_prob: float,
+    k_max: int | None = None
+):
+    system_index, local_idx = sm.state_index_dict[key]
+    system = sm.systems_list[system_index]
+
+    if system.isket:
+        system = qt.ket2dm(system)
+
+    dims = system.dims[0]
+    N = dims[local_idx]
+    assert isinstance(N, int)
+
+    eta = 1.0 - loss_prob
+    if k_max is None:
+        k_max = N - 1
+
+    a = qt.destroy(N)
+    n = a.dag() @ a
+
+    eta_n: qt.Qobj = (0.5 * np.log(eta) * n).expm()
+
+    id_ops = [qt.qeye(d) for d in dims]
+    rho_out = 0 * system
+
+    for k in range(k_max + 1):
+        Ak_local = (
+            ((1 - eta) ** (k / 2))
+            / np.sqrt(float(factorial(k)))
+            * eta_n
+            * (a ** k)
+        )
+
+        op_list = id_ops.copy()
+        op_list[local_idx] = Ak_local
+        K = qt.tensor(*op_list)
+
+        rho_out += K @ system @ K.dag()
+
+    sm.systems_list[system_index] = rho_out
+
+def apply_x(sm: StateManager, target_key: str):
+    system_index, target_idx = sm.state_index_dict[target_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    
+    op_list = [qt.qeye(d) for d in dims]
+    op_list[target_idx] = qt.gates.sigmax()
+    
+    X_total = qt.tensor(*op_list)
+    sm.apply_operation(system_index, X_total)
+
+def apply_z(sm: StateManager, target_key: str):
+    system_index, target_idx = sm.state_index_dict[target_key]
+    
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    
+    op_list = [qt.qeye(d) for d in dims]
+    op_list[target_idx] = qt.sigmaz()
+    
+    Z_total = qt.tensor(*op_list)
+    sm.apply_operation(system_index, Z_total)
+
+def apply_hadamard(sm: StateManager, target_key: str):
+    system_index, target_idx = sm.state_index_dict[target_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+
+    op_list = [qt.qeye(d) for d in dims]
+    
+    # Place Hadamard at the target index
+    op_list[target_idx] = qt.gates.snot()
+    
+    H_total = qt.tensor(*op_list)
+    sm.apply_operation(system_index, H_total)
+
+def apply_cnot(sm: StateManager, control_key: str, target_key: str):
+    sm.ensure_same_system(control_key, target_key)
+
+    system_index, control_idx = sm.state_index_dict[control_key]
+    _, target_idx = sm.state_index_dict[target_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+    
+    # Part 1: Control is in |0> (Identity on target)
+    op_list_0 = [qt.qeye(d) for d in dims]
+    op_list_0[control_idx] = qt.basis(2, 0).proj()
+    # Target stays Identity, so no change needed to op_list_0
+    
+    # Part 2: Control is in |1> (X on target)
+    op_list_1 = [qt.qeye(d) for d in dims]
+    op_list_1[control_idx] = qt.basis(2, 1).proj()
+    op_list_1[target_idx] = qt.sigmax()
+    
+    CNOT_total = qt.tensor(*op_list_0) + qt.tensor(*op_list_1)
+    sm.apply_operation(system_index, CNOT_total)
+
+# def apply_cz(sm: StateManager, control_key: str, target_key: str):
+#     apply_hadamard(sm, target_key)
+#     apply_cnot(sm, control_key, target_key)
+#     apply_hadamard(sm, target_key)
+
+def apply_cz(sm: StateManager, control_key: str, target_key: str):
+    sm.ensure_same_system(control_key, target_key)
+
+    system_index, control_idx = sm.state_index_dict[control_key]
+    _, target_idx = sm.state_index_dict[target_key]
+
+    system = sm.systems_list[system_index]
+    dims = system.dims[0]
+
+    # Control in |0>
+    op_list_0 = [qt.qeye(d) for d in dims]
+    op_list_0[control_idx] = qt.basis(2, 0).proj()
+
+    # Control in |1>
+    op_list_1 = [qt.qeye(d) for d in dims]
+    op_list_1[control_idx] = qt.basis(2, 1).proj()
+    op_list_1[target_idx] = qt.sigmaz()
+
+    CZ_total = qt.tensor(*op_list_0) + qt.tensor(*op_list_1)
+    sm.apply_operation(system_index, CZ_total)
+
+    
+def apply_swap(sm: StateManager, key1: str, key2: str):
+    if(key1 == key2):
+        return
+    
+    # A SWAP is 3 CNOTs
+    apply_cnot(sm, key1, key2)
+    apply_cnot(sm, key2, key1)
+    apply_cnot(sm, key1, key2)
+
+
+def swap_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
+    apply_swap(sm, source_key, target_key_list[0])
+
+def swap_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    apply_swap(sm, source_key_list[0], target_key)
 
 def steane_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
     # Fig. 13 of https://doi.org/10.1109/MCAS.2024.3349668
+
     apply_swap(sm, source_key, target_key_list[0])
+
     q = target_key_list
     apply_hadamard(sm, q[4])
     apply_hadamard(sm, q[5])
     apply_hadamard(sm, q[6])
+    
     apply_cnot(sm, q[0], q[3])
     apply_cnot(sm, q[0], q[2])
     apply_cnot(sm, q[6], q[3])
@@ -279,17 +733,15 @@ def steane_encode(sm: StateManager, source_key: str, target_key_list: list[str])
     apply_cnot(sm, q[4], q[0])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Steane decode variants  — add / swap your variants here
-# ─────────────────────────────────────────────────────────────────────────────
 
 @profile
-def steane_decode_v1(sm: StateManager, target_key: str, source_key_list: list[str]):
-    """Original version — Fig. 14 of https://doi.org/10.1109/MCAS.2024.3349668"""
+def steane_decode_old(sm: StateManager, target_key: str, source_key_list: list[str]):
+    # Fig. 14 of https://doi.org/10.1109/MCAS.2024.3349668
 
     anc_keys: list[str] = [f"steane_anc_{i}" for i in range(6)]
     for k in anc_keys:
         sm.add_subsystem(2, k)
+    
     for k in anc_keys:
         apply_hadamard(sm, k)
 
@@ -329,17 +781,22 @@ def steane_decode_v1(sm: StateManager, target_key: str, source_key_list: list[st
     for k in anc_keys:
         apply_hadamard(sm, k)
 
+
     possible_outcomes = list(product([0, 1], repeat=6))
 
     new_systems_list: list[qt.Qobj] = []
     for outcome_i in range(len(possible_outcomes)):
         outcome = possible_outcomes[outcome_i]
+        sm_probe = sm.clone()
         outcome_probability = 1.0
         for i, bit in enumerate(outcome):
-            sub_dm = sm.clone().ptrace_keep([anc_keys[i]], force_density_matrix=True)
+            sub_dm = sm_probe.clone().ptrace_keep([anc_keys[i]], force_density_matrix=True)
             p = sub_dm[bit, bit].real
             outcome_probability *= p
-            # (probability is computed on sm, correction is applied on sm_outcome below)
+            sm_probe.measure_subsystem(anc_keys[i], bit)
+            sm_probe.ptrace_subsystem(anc_keys[i])
+
+        #print(f"#{outcome_i}\t{outcome}: {outcome_probability}")
 
         sm_outcome = sm.clone()
         for i in range(len(outcome)):
@@ -349,35 +806,28 @@ def steane_decode_v1(sm: StateManager, target_key: str, source_key_list: list[st
         x_bits = (outcome[0], outcome[1], outcome[2])
         z_bits = (outcome[3], outcome[4], outcome[5])
 
-        # if x_bits == (0, 0, 0):   pass
-        # elif x_bits == (1, 0, 0): apply_x(sm_outcome, q[6])
-        # elif x_bits == (0, 1, 0): apply_x(sm_outcome, q[5])
-        # elif x_bits == (0, 0, 1): apply_x(sm_outcome, q[4])
-        # elif x_bits == (1, 1, 0): apply_x(sm_outcome, q[3])
-        # elif x_bits == (1, 0, 1): apply_x(sm_outcome, q[2])
-        # elif x_bits == (0, 1, 1): apply_x(sm_outcome, q[1])
-        # elif x_bits == (1, 1, 1): apply_x(sm_outcome, q[0])
+        # Error Correction not yet done
+        if(z_bits == (0,0,0)):
+            # A bit flip occurred
+            print(f"#{outcome_i}\t{outcome} {x_bits}: {outcome_probability}")
+            if x_bits == (0,0,1):
+                print("bingo!")
+                apply_x(sm_outcome, q[6])
 
-        # if z_bits == (0, 0, 0):   pass
-        # elif z_bits == (1, 0, 0): apply_z(sm_outcome, q[6])
-        # elif z_bits == (0, 1, 0): apply_z(sm_outcome, q[5])
-        # elif z_bits == (0, 0, 1): apply_z(sm_outcome, q[4])
-        # elif z_bits == (1, 1, 0): apply_z(sm_outcome, q[3])
-        # elif z_bits == (1, 0, 1): apply_z(sm_outcome, q[2])
-        # elif z_bits == (0, 1, 1): apply_z(sm_outcome, q[1])
-        # elif z_bits == (1, 1, 1): apply_z(sm_outcome, q[0])
-
+        
         if outcome_i == 0:
             for sys in sm_outcome.systems_list:
-                n = sys.shape[0]
+                n = sys.shape[0] 
                 new_systems_list.append(qt.Qobj(np.zeros((n, n)), dims=[sys.dims[0], sys.dims[0]]))
-        new_state_index_dict = sm_outcome.state_index_dict
-
+            new_state_index_dict = sm_outcome.state_index_dict
+        
         for i in range(len(sm_outcome.systems_list)):
             branch_state = sm_outcome.systems_list[i]
+            
             dm_to_add = qt.ket2dm(branch_state) if branch_state.isket else branch_state
+            
             new_systems_list[i] += outcome_probability * dm_to_add
-
+    
     sm.systems_list = new_systems_list
     sm.state_index_dict = new_state_index_dict.copy()
 
@@ -400,43 +850,41 @@ def steane_decode_v1(sm: StateManager, target_key: str, source_key_list: list[st
 
 
 @profile
-def steane_decode_v2(sm: StateManager, target_key: str, source_key_list: list[str]):
-    """Original version — Fig. 14 of https://doi.org/10.1109/MCAS.2024.3349668"""
-
+def steane_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    # Syndrome measurement circuit setup
     anc_keys: list[str] = [f"steane_anc_{i}" for i in range(6)]
     for k in anc_keys:
         sm.add_subsystem(2, k)
+    
     for k in anc_keys:
         apply_hadamard(sm, k)
 
     m = anc_keys
     q = source_key_list
 
+    # X-syndrome measurement
     apply_cnot(sm, m[5], q[6])
     apply_cnot(sm, m[5], q[3])
     apply_cnot(sm, m[5], q[2])
     apply_cnot(sm, m[5], q[1])
-
     apply_cnot(sm, m[4], q[5])
     apply_cnot(sm, m[4], q[3])
     apply_cnot(sm, m[4], q[1])
     apply_cnot(sm, m[4], q[0])
-
     apply_cnot(sm, m[3], q[4])
     apply_cnot(sm, m[3], q[2])
     apply_cnot(sm, m[3], q[1])
     apply_cnot(sm, m[3], q[0])
 
+    # Z-syndrome measurement
     apply_cz(sm, m[2], q[6])
     apply_cz(sm, m[2], q[3])
     apply_cz(sm, m[2], q[2])
     apply_cz(sm, m[2], q[1])
-
     apply_cz(sm, m[1], q[5])
     apply_cz(sm, m[1], q[3])
     apply_cz(sm, m[1], q[1])
     apply_cz(sm, m[1], q[0])
-
     apply_cz(sm, m[0], q[4])
     apply_cz(sm, m[0], q[2])
     apply_cz(sm, m[0], q[1])
@@ -446,264 +894,184 @@ def steane_decode_v2(sm: StateManager, target_key: str, source_key_list: list[st
         apply_hadamard(sm, k)
 
     possible_outcomes = list(product([0, 1], repeat=6))
+    
+    # List to store the weighted density matrices for each system
+    averaged_systems: list[qt.Qobj] = []
 
-    new_systems_list: list[qt.Qobj] = []
     for outcome_i in range(len(possible_outcomes)):
         outcome = possible_outcomes[outcome_i]
+        
+        # 1. Calculate outcome probability using a probe
+        sm_probe = sm.clone()
         outcome_probability = 1.0
         for i, bit in enumerate(outcome):
-            sub_dm = sm.clone().ptrace_keep([anc_keys[i]], force_density_matrix=True)
+            # Isolate ancilla to find probability
+            sub_dm = sm_probe.clone().ptrace_keep([anc_keys[i]], force_density_matrix=True)
             p = sub_dm[bit, bit].real
             outcome_probability *= p
-            # (probability is computed on sm, correction is applied on sm_outcome below)
+            sm_probe.measure_subsystem(anc_keys[i], bit)
+            sm_probe.ptrace_subsystem(anc_keys[i])
 
-        sm_outcome = sm.clone()
+        # 2. Apply measurement and correction to a fresh branch
+        sm_branch = sm.clone()
         for i in range(len(outcome)):
-            sm_outcome.measure_subsystem(anc_keys[i], outcome[i])
-            sm_outcome.ptrace_subsystem(anc_keys[i])
+            sm_branch.measure_subsystem(anc_keys[i], outcome[i])
+            sm_branch.ptrace_subsystem(anc_keys[i]) # Removes ancillas one by one
 
         x_bits = (outcome[0], outcome[1], outcome[2])
         z_bits = (outcome[3], outcome[4], outcome[5])
 
-        if x_bits == (0, 0, 0):   pass
-        elif x_bits == (1, 0, 0): apply_x(sm_outcome, q[6])
-        elif x_bits == (0, 1, 0): apply_x(sm_outcome, q[5])
-        elif x_bits == (0, 0, 1): apply_x(sm_outcome, q[4])
-        elif x_bits == (1, 1, 0): apply_x(sm_outcome, q[3])
-        elif x_bits == (1, 0, 1): apply_x(sm_outcome, q[2])
-        elif x_bits == (0, 1, 1): apply_x(sm_outcome, q[1])
-        elif x_bits == (1, 1, 1): apply_x(sm_outcome, q[0])
+        # --- RECOVERY ---
+        if z_bits == (0, 0, 1):
+            if x_bits == (0, 0, 1):
+                print(outcome_probability)
+                # Correction for channel 6 bit-flip
+                apply_x(sm_branch, q[6])
+                apply_z(sm_branch, q[6])
+                pass
 
-        if z_bits == (0, 0, 0):   pass
-        elif z_bits == (1, 0, 0): apply_z(sm_outcome, q[6])
-        elif z_bits == (0, 1, 0): apply_z(sm_outcome, q[5])
-        elif z_bits == (0, 0, 1): apply_z(sm_outcome, q[4])
-        elif z_bits == (1, 1, 0): apply_z(sm_outcome, q[3])
-        elif z_bits == (1, 0, 1): apply_z(sm_outcome, q[2])
-        elif z_bits == (0, 1, 1): apply_z(sm_outcome, q[1])
-        elif z_bits == (1, 1, 1): apply_z(sm_outcome, q[0])
+        # --- DECODING CIRCUIT ---
+        apply_cnot(sm_branch, q[4], q[0])
+        apply_cnot(sm_branch, q[4], q[1])
+        apply_cnot(sm_branch, q[4], q[2])
+        apply_cnot(sm_branch, q[5], q[0])
+        apply_cnot(sm_branch, q[5], q[1])
+        apply_cnot(sm_branch, q[5], q[3])
+        apply_cnot(sm_branch, q[6], q[1])
+        apply_cnot(sm_branch, q[6], q[2])
+        apply_cnot(sm_branch, q[6], q[3])
+        apply_cnot(sm_branch, q[0], q[2])
+        apply_cnot(sm_branch, q[0], q[3])
+        apply_hadamard(sm_branch, q[4])
+        apply_hadamard(sm_branch, q[5])
+        apply_hadamard(sm_branch, q[6])
 
-        if outcome_i == 0:
-            for sys in sm_outcome.systems_list:
-                n = sys.shape[0]
-                new_systems_list.append(qt.Qobj(np.zeros((n, n)), dims=[sys.dims[0], sys.dims[0]]))
-        new_state_index_dict = sm_outcome.state_index_dict
+        apply_swap(sm_branch, q[0], target_key)
 
-        for i in range(len(sm_outcome.systems_list)):
-            branch_state = sm_outcome.systems_list[i]
-            dm_to_add = qt.ket2dm(branch_state) if branch_state.isket else branch_state
-            new_systems_list[i] += outcome_probability * dm_to_add
+        # 3. Accumulate systems
+        if not averaged_systems:
+            # Initialize with zero matrices matching branch dimensions
+            for sys in sm_branch.systems_list:
+                dm = qt.ket2dm(sys) if sys.isket else sys
+                averaged_systems.append(0 * dm)
+            new_state_index_dict = sm_branch.state_index_dict
 
-    sm.systems_list = new_systems_list
-    sm.state_index_dict = new_state_index_dict.copy()
+        for i in range(len(sm_branch.systems_list)):
+            branch_sys = sm_branch.systems_list[i]
+            dm = qt.ket2dm(branch_sys) if branch_sys.isket else branch_sys
+            averaged_systems[i] += outcome_probability * dm
 
-    apply_cnot(sm, q[4], q[0])
-    apply_cnot(sm, q[4], q[1])
-    apply_cnot(sm, q[4], q[2])
-    apply_cnot(sm, q[5], q[0])
-    apply_cnot(sm, q[5], q[1])
-    apply_cnot(sm, q[5], q[3])
-    apply_cnot(sm, q[6], q[1])
-    apply_cnot(sm, q[6], q[2])
-    apply_cnot(sm, q[6], q[3])
-    apply_cnot(sm, q[0], q[2])
-    apply_cnot(sm, q[0], q[3])
-    apply_hadamard(sm, q[4])
-    apply_hadamard(sm, q[5])
-    apply_hadamard(sm, q[6])
-
-    apply_swap(sm, source_key_list[0], target_key)
+    # Update StateManager with averaged results
+    sm.systems_list = averaged_systems
+    sm.state_index_dict = new_state_index_dict
 
 
-@profile
-def steane_decode_v3(sm: StateManager, target_key: str, source_key_list: list[str]):
-    """Original version — Fig. 14 of https://doi.org/10.1109/MCAS.2024.3349668"""
-
-    anc_keys: list[str] = [f"steane_anc_{i}" for i in range(6)]
-    for k in anc_keys:
-        sm.add_subsystem(2, k)
-    for k in anc_keys:
-        apply_hadamard(sm, k)
-
-    m = anc_keys
-    q = source_key_list
-
-    apply_cnot(sm, m[5], q[6])
-    apply_cnot(sm, m[5], q[3])
-    apply_cnot(sm, m[5], q[2])
-    apply_cnot(sm, m[5], q[1])
-
-    apply_cnot(sm, m[4], q[5])
-    apply_cnot(sm, m[4], q[3])
-    apply_cnot(sm, m[4], q[1])
-    apply_cnot(sm, m[4], q[0])
-
-    apply_cnot(sm, m[3], q[4])
-    apply_cnot(sm, m[3], q[2])
-    apply_cnot(sm, m[3], q[1])
-    apply_cnot(sm, m[3], q[0])
-
-    apply_cz(sm, m[2], q[6])
-    apply_cz(sm, m[2], q[3])
-    apply_cz(sm, m[2], q[2])
-    apply_cz(sm, m[2], q[1])
-
-    apply_cz(sm, m[1], q[5])
-    apply_cz(sm, m[1], q[3])
-    apply_cz(sm, m[1], q[1])
-    apply_cz(sm, m[1], q[0])
-
-    apply_cz(sm, m[0], q[4])
-    apply_cz(sm, m[0], q[2])
-    apply_cz(sm, m[0], q[1])
-    apply_cz(sm, m[0], q[0])
-
-    for k in anc_keys:
-        apply_hadamard(sm, k)
-
-    possible_outcomes = list(product([0, 1], repeat=6))
-
-    new_systems_list: list[qt.Qobj] = []
-    for outcome_i in range(len(possible_outcomes)):
-        outcome = possible_outcomes[outcome_i]
-        outcome_probability = 1.0
-        for i, bit in enumerate(outcome):
-            sub_dm = sm.clone().ptrace_keep([anc_keys[i]], force_density_matrix=True)
-            p = sub_dm[bit, bit].real
-            outcome_probability *= p
-            # (probability is computed on sm, correction is applied on sm_outcome below)
-
-        sm_outcome = sm.clone()
-        for i in range(len(outcome)):
-            sm_outcome.measure_subsystem(anc_keys[i], outcome[i])
-            sm_outcome.ptrace_subsystem(anc_keys[i])
-
-        z_bits = (outcome[0], outcome[1], outcome[2])
-        x_bits = (outcome[3], outcome[4], outcome[5])
-
-        if z_bits == (0, 0, 0) or z_bits == x_bits:
-            if x_bits == (0, 0, 0):   pass
-            #elif x_bits == (1, 0, 0): apply_x(sm_outcome, q[6])
-            #elif x_bits == (0, 1, 0): apply_x(sm_outcome, q[5])
-            #elif x_bits == (0, 0, 1): apply_x(sm_outcome, q[4])
-            #elif x_bits == (1, 1, 0): apply_x(sm_outcome, q[3])
-            #elif x_bits == (1, 0, 1): apply_x(sm_outcome, q[2])
-            #elif x_bits == (0, 1, 1): apply_x(sm_outcome, q[1])
-            elif x_bits == (1, 1, 1): apply_x(sm_outcome, q[0])
-
-        if x_bits == (0, 0, 0) or x_bits == z_bits:
-            if z_bits == (0, 0, 0):   pass
-            #elif z_bits == (1, 0, 0): apply_z(sm_outcome, q[6])
-            #elif z_bits == (0, 1, 0): apply_z(sm_outcome, q[5])
-            #elif z_bits == (0, 0, 1): apply_z(sm_outcome, q[4])
-            #elif z_bits == (1, 1, 0): apply_z(sm_outcome, q[3])
-            #elif z_bits == (1, 0, 1): apply_z(sm_outcome, q[2])
-            #elif z_bits == (0, 1, 1): apply_z(sm_outcome, q[1])
-            elif z_bits == (1, 1, 1): apply_z(sm_outcome, q[0])
-
-        if outcome_i == 0:
-            for sys in sm_outcome.systems_list:
-                n = sys.shape[0]
-                new_systems_list.append(qt.Qobj(np.zeros((n, n)), dims=[sys.dims[0], sys.dims[0]]))
-        new_state_index_dict = sm_outcome.state_index_dict
-
-        for i in range(len(sm_outcome.systems_list)):
-            branch_state = sm_outcome.systems_list[i]
-            dm_to_add = qt.ket2dm(branch_state) if branch_state.isket else branch_state
-            new_systems_list[i] += outcome_probability * dm_to_add
-
-    sm.systems_list = new_systems_list
-    sm.state_index_dict = new_state_index_dict.copy()
-
-    apply_cnot(sm, q[4], q[0])
-    apply_cnot(sm, q[4], q[1])
-    apply_cnot(sm, q[4], q[2])
-    apply_cnot(sm, q[5], q[0])
-    apply_cnot(sm, q[5], q[1])
-    apply_cnot(sm, q[5], q[3])
-    apply_cnot(sm, q[6], q[1])
-    apply_cnot(sm, q[6], q[2])
-    apply_cnot(sm, q[6], q[3])
-    apply_cnot(sm, q[0], q[2])
-    apply_cnot(sm, q[0], q[3])
-    apply_hadamard(sm, q[4])
-    apply_hadamard(sm, q[5])
-    apply_hadamard(sm, q[6])
-
-    apply_swap(sm, source_key_list[0], target_key)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
-NUM_CHANNEL_QUBITS = 7
-LOSS_PROB = 0.01   # adjust as needed
 
-ideal_phi_plus = (qt.tensor(qt.basis(2, 0), qt.basis(2, 0)) +
-                  qt.tensor(qt.basis(2, 1), qt.basis(2, 1))).unit()
+class ChannelType(Enum):
+    CV_CAT = 1
+    CV_KITTEN = 2
+    DV_SINGLE_MODE = 3
+    DV_DUAL_MODE_MIXED = 4
+    CV_CAT_4 = 5
+
+@dataclass
+class PhyLayerConfiguration:
+    channel_type: ChannelType
+    N: int = 2
+    vertical_displacement: float | None = None
+    alpha: complex | None = None
+
+    def __post_init__(self):
+        if self.channel_type == ChannelType.CV_CAT:
+            if self.N is None or self.vertical_displacement is None:
+                raise ValueError(
+                    f"ChannelType.CV_CAT requires both 'N' and 'vertical_displacement'. "
+                    f"Got: N={self.N}, displacement={self.vertical_displacement}"
+                )
+        if self.channel_type == ChannelType.CV_CAT_4:
+            if self.N is None or self.alpha is None:
+                raise ValueError(
+                    f"ChannelType.CV_CAT_4 requires both 'N' and 'alpha'. "
+                    f"Got: N={self.N}, alpha={self.alpha}"
+                )
+        if self.channel_type == ChannelType.CV_KITTEN:
+            if self.N < 5:
+                raise ValueError(
+                    f"N={self.N} too low for Kitten state (min N=5)"
+                )
+
+class EncodingType(Enum):
+    SWAP_DUMMY_ENCODING = 1
+    REPETITION_BIT_FLIP = 2
+    REPETITION_PHASE_FLIP = 3
+    SHOR_9_QUBITS = 4
+    REPETITION_BIT_FLIP_WRAP = 5
+    REPETITION_PHASE_FLIP_WRAP = 6
+    STEANE_7_QUBITS = 7
+
+def generic_encode(sm: StateManager, source_key: str, target_key_list: list[str], encoding: EncodingType):
+    if encoding is EncodingType.SWAP_DUMMY_ENCODING:
+        swap_encode(sm, source_key, target_key_list)
+    elif encoding is EncodingType.STEANE_7_QUBITS:
+        steane_encode(sm, source_key, target_key_list)
+
+def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str], encoding: EncodingType):
+    if encoding is EncodingType.SWAP_DUMMY_ENCODING:
+        swap_decode(sm, target_key, source_key_list)
+    elif encoding is EncodingType.STEANE_7_QUBITS:
+        steane_decode(sm, target_key, source_key_list)
+
+
+ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
 ideal_rho = qt.ket2dm(ideal_phi_plus)
 
-def build_post_channel_state() -> tuple[StateManager, str]:
-    """
-    Encodes once with Steane-7, sends each of the 7 qubits through the
-    dual-mode mixed PHY channel (encode -> Kraus loss x 2 modes -> mixed decode),
-    and returns the frozen StateManager ready to be cloned for each decode variant.
-    """
-    sm = StateManager()
-
-    # Bell pair: tx_edge stays local, tx_temp is Steane-encoded and sent
-    sm.add_subsystem(2, "tx_edge")
-    sm.add_subsystem(2, "tx_temp")
-    apply_hadamard(sm, "tx_edge")
-    apply_cnot(sm, "tx_edge", "tx_temp")
-
-    for i in range(NUM_CHANNEL_QUBITS):
-        sm.add_subsystem(2, f"ch_{i}_tx")
-
-    steane_encode(sm, "tx_temp", [f"ch_{i}_tx" for i in range(NUM_CHANNEL_QUBITS)])
-    sm.ptrace_subsystem("tx_temp")
-
-    # PHY layer: each of the 7 Steane qubits goes through dual-mode mixed channel
-    for i in range(NUM_CHANNEL_QUBITS):
-        sm.add_subsystem(2, f"ch_{i}_rx")
-        apply_dual_mode_mixed_channel(sm, f"ch_{i}_tx", f"ch_{i}_rx", LOSS_PROB)
-
-    return sm, "tx_edge"
 
 
-def measure_fidelity(sm: StateManager, tx_edge_key: str, decoded_key: str) -> float:
-    edge_qubits = sm.clone().ptrace_keep([tx_edge_key, decoded_key]).unit()
-    print(edge_qubits)
-    return qt.fidelity(edge_qubits, ideal_rho)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main — encode once, channel once, decode many times
-# ─────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    print("Building post-channel state (encode + dual-mode mixed channel) …")
-    sm_post_channel, tx_edge_key = build_post_channel_state()
-    channel_keys = [f"ch_{i}_rx" for i in range(NUM_CHANNEL_QUBITS)]
+ph = PhyLayerConfiguration(channel_type=ChannelType.CV_CAT_4, N=20, alpha=1.5)
+encoding_type = EncodingType.STEANE_7_QUBITS
+NUM_CHANNEL_QUBITS = 7
+loss_prob = 0.01
+N = ph.N
 
-    sm = sm_post_channel.clone()
-    sm.add_subsystem(2, "rx")
-    steane_decode_v1(sm, "rx", channel_keys)
-    fid = measure_fidelity(sm, tx_edge_key, "rx")
-    print(f"[v1] Fidelity = {fid:.6f}")
+sm = StateManager()
 
+sm.add_subsystem(2, "tx_edge")
+sm.add_subsystem(2, "tx_temp")
 
-    sm = sm_post_channel.clone()
-    sm.add_subsystem(2, "rx")
-    steane_decode_v2(sm, "rx", channel_keys)
-    fid = measure_fidelity(sm, tx_edge_key, "rx")
-    print(f"[v2] Fidelity = {fid:.6f}")
+apply_hadamard(sm, "tx_edge")
+apply_cnot(sm, "tx_edge", "tx_temp")
 
-    sm = sm_post_channel.clone()
-    sm.add_subsystem(2, "rx")
-    steane_decode_v3(sm, "rx", channel_keys)
-    fid = measure_fidelity(sm, tx_edge_key, "rx")
-    print(f"[v3] Fidelity = {fid:.6f}")
+for i in range(NUM_CHANNEL_QUBITS):
+    sm.add_subsystem(2, f"channel_{i}_tx")
 
-    print("\nDone.")
+generic_encode(sm, "tx_temp", [f"channel_{i}_tx" for i in range(NUM_CHANNEL_QUBITS)], encoding_type)
+sm.ptrace_subsystem("tx_temp")
+
+for i in range(NUM_CHANNEL_QUBITS):
+    sm.add_subsystem(2, f"channel_{i}_rx")
+    if ph.channel_type is ChannelType.CV_CAT_4:
+        assert ph.alpha is not None
+        sm.add_subsystem(N, f"channel_{i}_cat")
+        apply_4_legged_cat_encoding(sm, f"channel_{i}_tx", f"channel_{i}_cat", ph.alpha, N)
+        sm.ptrace_subsystem(f"channel_{i}_tx")
+        apply_kraus_loss(sm, f"channel_{i}_cat", loss_prob/10 if i != 6 else loss_prob*10)
+        apply_4_legged_cat_decoding(sm, f"channel_{i}_rx", f"channel_{i}_cat", ph.alpha, N)
+        sm.ptrace_subsystem(f"channel_{i}_cat")
+
+sm.add_subsystem(2, "rx_edge")
+
+generic_decode(sm, "rx_edge", [f"channel_{i}_rx" for i in range(NUM_CHANNEL_QUBITS)], encoding_type)
+
+for i in range(NUM_CHANNEL_QUBITS):
+    sm.ptrace_subsystem(f"channel_{i}_rx")
+
+edge_qubits = sm.ptrace_keep(["tx_edge", "rx_edge"]).unit()
+fid = qt.fidelity(edge_qubits, ideal_rho)
+
+print(1-fid)
