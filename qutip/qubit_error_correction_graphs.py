@@ -616,43 +616,29 @@ def apply_kraus_loss(
 
     sm.systems_list[system_index] = rho_out
 
-def apply_x(sm: StateManager, target_key: str):
+def apply_qubit_gate(sm: StateManager, target_key: str, gate: qt.Qobj):
     system_index, target_idx = sm.state_index_dict[target_key]
     
     system = sm.systems_list[system_index]
     dims = system.dims[0]
     
     op_list = [qt.qeye(d) for d in dims]
-    op_list[target_idx] = qt.gates.sigmax()
+    op_list[target_idx] = gate
     
     X_total = qt.tensor(*op_list)
     sm.apply_operation(system_index, X_total)
 
+def apply_x(sm: StateManager, target_key: str):
+    apply_qubit_gate(sm, target_key, qt.sigmax())
+
 def apply_z(sm: StateManager, target_key: str):
-    system_index, target_idx = sm.state_index_dict[target_key]
-    
-    system = sm.systems_list[system_index]
-    dims = system.dims[0]
-    
-    op_list = [qt.qeye(d) for d in dims]
-    op_list[target_idx] = qt.sigmaz()
-    
-    Z_total = qt.tensor(*op_list)
-    sm.apply_operation(system_index, Z_total)
+    apply_qubit_gate(sm, target_key, qt.sigmaz())
+
+def apply_y(sm: StateManager, target_key: str):
+    apply_qubit_gate(sm, target_key, qt.sigmay())
 
 def apply_hadamard(sm: StateManager, target_key: str):
-    system_index, target_idx = sm.state_index_dict[target_key]
-
-    system = sm.systems_list[system_index]
-    dims = system.dims[0]
-
-    op_list = [qt.qeye(d) for d in dims]
-    
-    # Place Hadamard at the target index
-    op_list[target_idx] = qt.gates.snot()
-    
-    H_total = qt.tensor(*op_list)
-    sm.apply_operation(system_index, H_total)
+    apply_qubit_gate(sm, target_key, qt.gates.snot())
 
 def apply_cnot(sm: StateManager, control_key: str, target_key: str):
     sm.ensure_same_system(control_key, target_key)
@@ -1204,7 +1190,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
             (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
@@ -1214,7 +1200,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
             (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
@@ -1225,7 +1211,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
             (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
@@ -1234,7 +1220,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
             (EncodingType.REPETITION_BIT_FLIP, 3),
             (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
