@@ -90,7 +90,11 @@ class StateManager:
         if(sys1 != sys2):
             self.merge_systems(sys1, sys2)
     
-    def ptrace_keep(self, keep_key_list: list[str], force_density_matrix: bool = True) -> qt.Qobj:
+    def ptrace_keep(self, keep_key_list: list[str]) -> qt.Qobj:
+        """
+        The list is used for the reordering of the returned density matrix, but the system index mappings are not
+        changed based on that list, so after this call they might be out of order.
+        """
         for i in range(1, len(keep_key_list)):
             k = keep_key_list[i]
             self.ensure_same_system(keep_key_list[0], k)
@@ -99,7 +103,12 @@ class StateManager:
             if k not in keep_key_list:
                 self.ptrace_subsystem(k)
         assert len(self.systems_list) == 1
-        return qt.ket2dm(self.systems_list[0]) if force_density_matrix and self.systems_list[0].isket else self.systems_list[0]
+        to_return = qt.ket2dm(self.systems_list[0]) if self.systems_list[0].isket else self.systems_list[0]
+        new_order_list: list[int] = []
+        for kk in keep_key_list:
+            new_order_list += [self.state_index_dict[kk][1]]
+        to_return.permute(new_order_list)
+        return to_return
 
     def clone(self) -> Self:
         new_manager = StateManager()
@@ -776,7 +785,7 @@ def repetition_decode_mod(sm: StateManager, target_key: str, source_key_list: li
     apply_cnot(sm, source_key_list[1], anc_2_key)
     apply_cnot(sm, source_key_list[2], anc_2_key)
 
-    ancilla_dm = sm.clone().ptrace_keep([anc_1_key, anc_2_key], force_density_matrix=True)
+    ancilla_dm = sm.clone().ptrace_keep([anc_1_key, anc_2_key])
 
     possible_outcomes = [(0,0), (0, 1), (1, 0), (1, 1)]
 
@@ -852,7 +861,7 @@ def repetition_5_qubit_decode(sm: StateManager, target_key: str, source_key_list
     apply_cnot(sm, source_key_list[3], anc_4_key)
     apply_cnot(sm, source_key_list[4], anc_4_key)
 
-    ancilla_dm = sm.clone().ptrace_keep([anc_1_key, anc_2_key, anc_3_key, anc_4_key], force_density_matrix=True)
+    ancilla_dm = sm.clone().ptrace_keep([anc_1_key, anc_2_key, anc_3_key, anc_4_key])
 
     possible_outcomes = [
         (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
