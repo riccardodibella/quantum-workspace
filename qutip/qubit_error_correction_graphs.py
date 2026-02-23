@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import inspect
+import itertools
 from typing import Self, cast
 from line_profiler import profile
 import matplotlib.pyplot as plt
@@ -944,6 +945,92 @@ def repetition_5_qubit_decode(sm: StateManager, target_key: str, source_key_list
     for i in range(1, len(source_key_list)):
         sm.add_subsystem(2, source_key_list[i])
 
+def repetition_n_qubit_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    if len(source_key_list) % 2 != 1:
+        print("unsupported repetition_n_qubit_decode for n even")
+        exit()
+    
+    num_ancillas = len(source_key_list)-1
+    max_errors = num_ancillas / 2
+    assert max_errors.is_integer()
+    max_errors = int(max_errors)
+    
+    anc_keys: list[str] = [f"rnqd_anc_{i}" for i in range(num_ancillas)]
+
+    for i in range(num_ancillas):
+        sm.add_subsystem(2, anc_keys[i])
+        apply_cnot(sm, source_key_list[i], anc_keys[i])
+        apply_cnot(sm, source_key_list[i+1], anc_keys[i])
+
+    ancilla_dm = sm.clone().ptrace_keep(anc_keys)
+
+    possible_outcomes = list(itertools.product([0, 1], repeat=num_ancillas))
+    syndrome_correction_map = {outcome: "IIIII" for outcome in possible_outcomes}    
+    syndrome_correction_map = {
+        (0, 0, 0, 0): "IIIII",
+        (0, 0, 0, 1): "IIIIX",
+        (0, 0, 1, 0): "IIXII",
+        (0, 0, 1, 1): "IIIXI",
+        (0, 1, 0, 0): "XIXII",
+        (0, 1, 0, 1): "IIXXI",
+        (0, 1, 1, 0): "IIXIX",
+        (0, 1, 1, 1): "IIIXI",
+        (1, 0, 0, 0): "XIIII",
+        (1, 0, 0, 1): "XIIIX",
+        (1, 0, 1, 0): "IXIXI",
+        (1, 0, 1, 1): "IXIIX",
+        (1, 1, 0, 0): "IXIII",
+        (1, 1, 0, 1): "IXIIX",
+        (1, 1, 1, 0): "XIXIX",
+        (1, 1, 1, 1): "IXIXI",
+    }
+    
+
+    new_systems_list: list[qt.Qobj] = []
+    for outcome_i in range(len(possible_outcomes)):
+        outcome = possible_outcomes[outcome_i]
+        outcome_probability: complex = ancilla_dm[outcome_i, outcome_i]
+        outcome_probability = outcome_probability.real
+
+        sm_outcome = sm.clone()
+        for i in range(num_ancillas):
+            sm_outcome.measure_subsystem(anc_keys[i], outcome[i])
+            sm_outcome.ptrace_subsystem(anc_keys[i])
+
+        correction_str = syndrome_correction_map[outcome] # type: ignore
+        for qubit_num in range(len(correction_str)):
+            qubit_correction = correction_str[qubit_num]
+            if qubit_correction == "I":
+                pass
+            elif qubit_correction == "X":
+                apply_x(sm_outcome, source_key_list[qubit_num])
+        
+        if outcome_i == 0:
+            for sys in sm_outcome.systems_list:
+                n = sys.shape[0] 
+                new_systems_list.append(qt.Qobj(np.zeros((n, n)), dims=[sys.dims[0], sys.dims[0]]))
+        new_state_index_dict = sm_outcome.state_index_dict
+        
+        for i in range(len(sm_outcome.systems_list)):
+            branch_state = sm_outcome.systems_list[i]
+            
+            dm_to_add = qt.ket2dm(branch_state) if branch_state.isket else branch_state
+            
+            new_systems_list[i] += outcome_probability * dm_to_add
+            
+    sm.systems_list = new_systems_list
+    sm.state_index_dict = new_state_index_dict.copy()
+
+    for i in range(1, len(source_key_list)):
+        # Reset all qubits apart from the first to |0>
+        apply_cnot(sm, source_key_list[0], source_key_list[i])
+        sm.ptrace_subsystem(source_key_list[i])
+
+    apply_swap(sm, source_key_list[0], target_key)
+
+    for i in range(1, len(source_key_list)):
+        sm.add_subsystem(2, source_key_list[i])
+
 def phase_repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
     apply_hadamard(sm, source_key)
     repetition_encode(sm, source_key, target_key_list)
@@ -1098,7 +1185,7 @@ def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str]
     elif encoding is EncodingType.REPETITION_PHASE_FLIP_WRAP:
         phase_wrap_repetition_decode(sm, target_key, source_key_list)
     elif encoding is EncodingType.REPETITION_5_BIT_FLIP:
-        repetition_5_qubit_decode(sm, target_key, source_key_list)
+        repetition_n_qubit_decode(sm, target_key, source_key_list)
 
 
 ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
@@ -1190,7 +1277,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
             (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
@@ -1200,7 +1287,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
             (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
@@ -1211,7 +1298,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
             (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
@@ -1220,7 +1307,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.SHOR_9_QUBITS, 9),
             (EncodingType.REPETITION_BIT_FLIP, 3),
             (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
