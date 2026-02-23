@@ -741,170 +741,6 @@ def swap_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
 def swap_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
     apply_swap(sm, source_key_list[0], target_key)
 
-def steane_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
-    # Fig. 13 of https://doi.org/10.1109/MCAS.2024.3349668
-
-    apply_swap(sm, source_key, target_key_list[0])
-
-    q = target_key_list
-    apply_hadamard(sm, q[4])
-    apply_hadamard(sm, q[5])
-    apply_hadamard(sm, q[6])
-    
-    apply_cnot(sm, q[0], q[3])
-    apply_cnot(sm, q[0], q[2])
-    apply_cnot(sm, q[6], q[3])
-    apply_cnot(sm, q[6], q[2])
-    apply_cnot(sm, q[6], q[1])
-    apply_cnot(sm, q[5], q[3])
-    apply_cnot(sm, q[5], q[1])
-    apply_cnot(sm, q[5], q[0])
-    apply_cnot(sm, q[4], q[2])
-    apply_cnot(sm, q[4], q[1])
-    apply_cnot(sm, q[4], q[0])
-
-
-
-@profile
-def steane_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
-    # Fig. 14 of https://doi.org/10.1109/MCAS.2024.3349668
-
-    anc_keys: list[str] = [f"steane_anc_{i}" for i in range(6)]
-    for k in anc_keys:
-        sm.add_subsystem(2, k)
-    
-    for k in anc_keys:
-        apply_hadamard(sm, k)
-
-    m = anc_keys
-    q = source_key_list
-
-    apply_cnot(sm, m[5], q[6])
-    apply_cnot(sm, m[5], q[3])
-    apply_cnot(sm, m[5], q[2])
-    apply_cnot(sm, m[5], q[1])
-
-    apply_cnot(sm, m[4], q[5])
-    apply_cnot(sm, m[4], q[3])
-    apply_cnot(sm, m[4], q[1])
-    apply_cnot(sm, m[4], q[0])
-
-    apply_cnot(sm, m[3], q[4])
-    apply_cnot(sm, m[3], q[2])
-    apply_cnot(sm, m[3], q[1])
-    apply_cnot(sm, m[3], q[0])
-
-    apply_cz(sm, m[2], q[6])
-    apply_cz(sm, m[2], q[3])
-    apply_cz(sm, m[2], q[2])
-    apply_cz(sm, m[2], q[1])
-
-    apply_cz(sm, m[1], q[5])
-    apply_cz(sm, m[1], q[3])
-    apply_cz(sm, m[1], q[1])
-    apply_cz(sm, m[1], q[0])
-
-    apply_cz(sm, m[0], q[4])
-    apply_cz(sm, m[0], q[2])
-    apply_cz(sm, m[0], q[1])
-    apply_cz(sm, m[0], q[0])
-
-    for k in anc_keys:
-        apply_hadamard(sm, k)
-
-
-    possible_outcomes = list(product([0, 1], repeat=6))
-
-    new_systems_list: list[qt.Qobj] = []
-    for outcome_i in range(len(possible_outcomes)):
-        outcome = possible_outcomes[outcome_i]
-        sm_probe = sm.clone()
-        outcome_probability = 1.0
-        for i, bit in enumerate(outcome):
-            sub_dm = sm_probe.clone().ptrace_keep([anc_keys[i]], force_density_matrix=True)
-            p = sub_dm[bit, bit].real
-            outcome_probability *= p
-            sm_probe.measure_subsystem(anc_keys[i], bit)
-            sm_probe.ptrace_subsystem(anc_keys[i])
-
-        #print(f"{outcome}: {outcome_probability}")
-
-        sm_outcome = sm.clone()
-        for i in range(len(outcome)):
-            sm_outcome.measure_subsystem(anc_keys[i], outcome[i])
-            sm_outcome.ptrace_subsystem(anc_keys[i])
-
-        x_bits = (outcome[0], outcome[1], outcome[2])
-        z_bits = (outcome[3], outcome[4], outcome[5])
-
-        if x_bits == (0,0,0):
-            pass
-        elif x_bits == (1,0,0):
-            apply_x(sm_outcome, q[6])
-        elif x_bits == (0,1,0):
-            apply_x(sm_outcome, q[5])
-        elif x_bits == (0,0,1):
-            apply_x(sm_outcome, q[4])
-        elif x_bits == (1,1,0):
-            apply_x(sm_outcome, q[3])
-        elif x_bits == (1,0,1):
-            apply_x(sm_outcome, q[2])
-        elif x_bits == (0,1,1):
-            apply_x(sm_outcome, q[1])
-        elif x_bits == (1,1,1):
-            apply_x(sm_outcome, q[0])
-
-        if z_bits == (0,0,0):
-            pass
-        elif z_bits == (1,0,0):
-            apply_z(sm_outcome, q[6])
-        elif z_bits == (0,1,0):
-            apply_z(sm_outcome, q[5])
-        elif z_bits == (0,0,1):
-            apply_z(sm_outcome, q[4])
-        elif z_bits == (1,1,0):
-            apply_z(sm_outcome, q[3])
-        elif z_bits == (1,0,1):
-            apply_z(sm_outcome, q[2])
-        elif z_bits == (0,1,1):
-            apply_z(sm_outcome, q[1])
-        elif z_bits == (1,1,1):
-            apply_z(sm_outcome, q[0])
-
-        
-        if outcome_i == 0:
-            for sys in sm_outcome.systems_list:
-                n = sys.shape[0] 
-                new_systems_list.append(qt.Qobj(np.zeros((n, n)), dims=[sys.dims[0], sys.dims[0]]))
-        new_state_index_dict = sm_outcome.state_index_dict
-        
-        for i in range(len(sm_outcome.systems_list)):
-            branch_state = sm_outcome.systems_list[i]
-            
-            dm_to_add = qt.ket2dm(branch_state) if branch_state.isket else branch_state
-            
-            new_systems_list[i] += outcome_probability * dm_to_add
-    
-    sm.systems_list = new_systems_list
-    sm.state_index_dict = new_state_index_dict.copy()
-
-    apply_cnot(sm, q[4], q[0])
-    apply_cnot(sm, q[4], q[1])
-    apply_cnot(sm, q[4], q[2])
-    apply_cnot(sm, q[5], q[0])
-    apply_cnot(sm, q[5], q[1])
-    apply_cnot(sm, q[5], q[3])
-    apply_cnot(sm, q[6], q[1])
-    apply_cnot(sm, q[6], q[2])
-    apply_cnot(sm, q[6], q[3])
-    apply_cnot(sm, q[0], q[2])
-    apply_cnot(sm, q[0], q[3])
-    apply_hadamard(sm, q[4])
-    apply_hadamard(sm, q[5])
-    apply_hadamard(sm, q[6])
-
-    apply_swap(sm, source_key_list[0], target_key)
-
 
 def repetition_encode(sm: StateManager, source_key: str, target_key_list: list[str]):
     apply_swap(sm, source_key, target_key_list[0])
@@ -964,6 +800,128 @@ def repetition_decode_mod(sm: StateManager, target_key: str, source_key_list: li
             apply_x(sm_outcome, source_key_list[1])
         elif outcome == (0, 1):
             apply_x(sm_outcome, source_key_list[2])
+        
+        if outcome_i == 0:
+            for sys in sm_outcome.systems_list:
+                n = sys.shape[0] 
+                new_systems_list.append(qt.Qobj(np.zeros((n, n)), dims=[sys.dims[0], sys.dims[0]]))
+        new_state_index_dict = sm_outcome.state_index_dict
+        
+        for i in range(len(sm_outcome.systems_list)):
+            branch_state = sm_outcome.systems_list[i]
+            
+            dm_to_add = qt.ket2dm(branch_state) if branch_state.isket else branch_state
+            
+            new_systems_list[i] += outcome_probability * dm_to_add
+            
+    sm.systems_list = new_systems_list
+    sm.state_index_dict = new_state_index_dict.copy()
+
+    for i in range(1, len(source_key_list)):
+        # Reset all qubits apart from the first to |0>
+        apply_cnot(sm, source_key_list[0], source_key_list[i])
+        sm.ptrace_subsystem(source_key_list[i])
+
+    apply_swap(sm, source_key_list[0], target_key)
+
+    for i in range(1, len(source_key_list)):
+        sm.add_subsystem(2, source_key_list[i])
+
+def repetition_5_qubit_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
+    if len(source_key_list) != 5:
+        print("unsupported repetition_5_qubit_decode for n != 5")
+        exit()
+    # https://chatgpt.com/share/699c089d-fc68-8007-9f00-1fd4f310456b
+    
+    anc_1_key = "rdm_anc_1"
+    anc_2_key = "rdm_anc_2"
+    anc_3_key = "rdm_anc_3"
+    anc_4_key = "rdm_anc_4"
+
+    sm.add_subsystem(2, anc_1_key)
+    sm.add_subsystem(2, anc_2_key)
+    sm.add_subsystem(2, anc_3_key)
+    sm.add_subsystem(2, anc_4_key)
+
+    apply_cnot(sm, source_key_list[0], anc_1_key)
+    apply_cnot(sm, source_key_list[1], anc_1_key)
+    apply_cnot(sm, source_key_list[1], anc_2_key)
+    apply_cnot(sm, source_key_list[2], anc_2_key)
+    apply_cnot(sm, source_key_list[2], anc_3_key)
+    apply_cnot(sm, source_key_list[3], anc_3_key)
+    apply_cnot(sm, source_key_list[3], anc_4_key)
+    apply_cnot(sm, source_key_list[4], anc_4_key)
+
+    ancilla_dm = sm.clone().ptrace_keep([anc_1_key, anc_2_key, anc_3_key, anc_4_key], force_density_matrix=True)
+
+    possible_outcomes = [
+        (0,0,0,0), (0,0,0,1), (0,0,1,0), (0,0,1,1),
+        (0,1,0,0), (0,0,0,1), (0,1,1,0), (0,1,1,1), 
+        (0,1,0,0), (1,0,0,1), (1,0,1,0), (1,0,1,1),
+        (1,1,0,0), (1,1,0,1), (1,1,1,0), (1,1,1,1)
+    ]
+
+    new_systems_list: list[qt.Qobj] = []
+    for outcome_i in range(len(possible_outcomes)):
+        outcome = possible_outcomes[outcome_i]
+        outcome_probability: complex = ancilla_dm[outcome_i, outcome_i]
+        outcome_probability = outcome_probability.real
+
+        sm_outcome = sm.clone()
+        sm_outcome.measure_subsystem(anc_1_key, outcome[0])
+        sm_outcome.ptrace_subsystem(anc_1_key)
+        sm_outcome.measure_subsystem(anc_2_key, outcome[1])
+        sm_outcome.ptrace_subsystem(anc_2_key)
+        sm_outcome.measure_subsystem(anc_3_key, outcome[2])
+        sm_outcome.ptrace_subsystem(anc_3_key)
+        sm_outcome.measure_subsystem(anc_4_key, outcome[3])
+        sm_outcome.ptrace_subsystem(anc_4_key)
+
+        if outcome == (0,0,0,0):
+            pass
+        
+        elif outcome == (1,0,0,0):
+            apply_x(sm_outcome, source_key_list[0])
+        elif outcome == (1,1,0,0):
+            apply_x(sm_outcome, source_key_list[1])
+        elif outcome == (0,1,1,0):
+            apply_x(sm_outcome, source_key_list[2])
+        elif outcome == (0,0,1,1):
+            apply_x(sm_outcome, source_key_list[3])
+        elif outcome == (0,0,0,1):
+            apply_x(sm_outcome, source_key_list[4])
+        
+        elif outcome == (0,1,0,0):
+            apply_x(sm_outcome, source_key_list[0])
+            apply_x(sm_outcome, source_key_list[1])
+        elif outcome == (1,0,1,0):
+            apply_x(sm_outcome, source_key_list[1])
+            apply_x(sm_outcome, source_key_list[2])
+        elif outcome == (0,1,0,1):
+            apply_x(sm_outcome, source_key_list[2])
+            apply_x(sm_outcome, source_key_list[3])
+        elif outcome == (0,0,1,0):
+            apply_x(sm_outcome, source_key_list[3])
+            apply_x(sm_outcome, source_key_list[4])
+        elif outcome == (1,1,1,0):
+            apply_x(sm_outcome, source_key_list[0])
+            apply_x(sm_outcome, source_key_list[2])
+        elif outcome == (1,0,1,1):
+            apply_x(sm_outcome, source_key_list[0])
+            apply_x(sm_outcome, source_key_list[3])
+        elif outcome == (1,0,0,1):
+            apply_x(sm_outcome, source_key_list[0])
+            apply_x(sm_outcome, source_key_list[4])
+        elif outcome == (1,1,1,1):
+            apply_x(sm_outcome, source_key_list[1])
+            apply_x(sm_outcome, source_key_list[3])
+        elif outcome == (1,1,0,1):
+            apply_x(sm_outcome, source_key_list[1])
+            apply_x(sm_outcome, source_key_list[4])
+        elif outcome == (0,1,1,1):
+            apply_x(sm_outcome, source_key_list[2])
+            apply_x(sm_outcome, source_key_list[4])
+
         
         if outcome_i == 0:
             for sys in sm_outcome.systems_list:
@@ -1113,7 +1071,7 @@ class EncodingType(Enum):
     SHOR_9_QUBITS = 4
     REPETITION_BIT_FLIP_WRAP = 5
     REPETITION_PHASE_FLIP_WRAP = 6
-    STEANE_7_QUBITS = 7
+    REPETITION_5_BIT_FLIP = 8
 
 def generic_encode(sm: StateManager, source_key: str, target_key_list: list[str], encoding: EncodingType):
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
@@ -1128,8 +1086,8 @@ def generic_encode(sm: StateManager, source_key: str, target_key_list: list[str]
         wrap_repetition_encode(sm, source_key, target_key_list)
     elif encoding is EncodingType.REPETITION_PHASE_FLIP_WRAP:
         phase_wrap_repetition_encode(sm, source_key, target_key_list)
-    elif encoding is EncodingType.STEANE_7_QUBITS:
-        steane_encode(sm, source_key, target_key_list)
+    elif encoding is EncodingType.REPETITION_5_BIT_FLIP:
+        repetition_encode(sm, source_key, target_key_list)
 
 def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str], encoding: EncodingType):
     if encoding is EncodingType.SWAP_DUMMY_ENCODING:
@@ -1144,8 +1102,8 @@ def generic_decode(sm: StateManager, target_key: str, source_key_list: list[str]
         wrap_repetition_decode(sm, target_key, source_key_list)
     elif encoding is EncodingType.REPETITION_PHASE_FLIP_WRAP:
         phase_wrap_repetition_decode(sm, target_key, source_key_list)
-    elif encoding is EncodingType.STEANE_7_QUBITS:
-        steane_decode(sm, target_key, source_key_list)
+    elif encoding is EncodingType.REPETITION_5_BIT_FLIP:
+        repetition_5_qubit_decode(sm, target_key, source_key_list)
 
 
 ideal_phi_plus = (qt.tensor(qt.basis(2,0), qt.basis(2,0)) + qt.tensor(qt.basis(2,1), qt.basis(2,1))).unit()
@@ -1235,32 +1193,32 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         PhyLayerConfiguration(channel_type=ChannelType.CV_KITTEN, N=5), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            (EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
             #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
-            #(EncodingType.STEANE_7_QUBITS, 7),
+            (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT, N=18, vertical_displacement=1.5), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            (EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
-            #(EncodingType.STEANE_7_QUBITS, 7),
+            (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT_4, N=20, alpha=1.5), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            (EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
             #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
-            #(EncodingType.STEANE_7_QUBITS, 7),
+            (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
     ),
     (
@@ -1268,21 +1226,21 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             #(EncodingType.SHOR_9_QUBITS, 9),
-            #(EncodingType.STEANE_7_QUBITS, 7),
+            (EncodingType.REPETITION_BIT_FLIP, 3),
+            (EncodingType.REPETITION_5_BIT_FLIP, 5),
         ]
     ),
     (
         PhyLayerConfiguration(channel_type=ChannelType.DV_DUAL_MODE_MIXED), 
         [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
+            #(EncodingType.SWAP_DUMMY_ENCODING, 1),
+            #(EncodingType.REPETITION_BIT_FLIP, 3),
             (EncodingType.SHOR_9_QUBITS, 9),
-            (EncodingType.STEANE_7_QUBITS, 7),
         ]
     ),
 ]
 
-loss_prob_list = list(np.logspace(np.log10(0.01), np.log10(0.8), num=5)) + list(np.linspace(0.81, 0.99, 2))
+loss_prob_list = list(np.logspace(np.log10(0.05), np.log10(0.8), num=50)) + list(np.linspace(0.81, 0.99, 19))
 
 # Define line styles for different physical layers to distinguish them
 styles = {
