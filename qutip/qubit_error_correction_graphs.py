@@ -49,11 +49,12 @@ class StateManager:
             if sys_idx == system_index:
                 count += 1
         return count
-        
+
     def ptrace_subsystem(self, key: str) -> None:
         system_index, target_subsystem_index = self.state_index_dict[key]
         prev_subsystem_count = self.get_system_subsystems_count(system_index)
-        self.systems_list[system_index] = self.systems_list[system_index].ptrace([i for i in range(prev_subsystem_count) if i != target_subsystem_index])
+        remaining_subsystem_idxs = [i for i in range(prev_subsystem_count) if i != target_subsystem_index]
+        self.systems_list[system_index] = self.systems_list[system_index].ptrace(remaining_subsystem_idxs)
         del self.state_index_dict[key]
         if(prev_subsystem_count > 1):
             for k, (v_sys, v_sub) in self.state_index_dict.items():
@@ -64,6 +65,62 @@ class StateManager:
             for k, (v_sys, v_sub) in self.state_index_dict.items():
                 if v_sys > system_index:
                     self.state_index_dict[k] = (v_sys - 1, v_sub)
+
+    @profile    
+    def ptrace_subsystems(self, keys: list[str]) -> None: # https://gemini.google.com/share/8fb811e25871         
+        if not keys:
+            return
+
+        # 1. Group target subsystem indices by their system index
+        # We use a dict: { system_index: [list_of_sub_indices_to_remove] }
+        targets_by_system: dict[int, list[int]] = {}
+        for key in keys:
+            if key not in self.state_index_dict:
+                raise ValueError(f"Key '{key}' not found.")
+            sys_idx, sub_idx = self.state_index_dict[key]
+            if sys_idx not in targets_by_system:
+                targets_by_system[sys_idx] = []
+            targets_by_system[sys_idx].append(sub_idx)
+
+        # 2. Process systems in reverse order
+        # We go backwards so that popping a system from systems_list 
+        # doesn't invalidate the system_indices we are about to process.
+        sorted_systems = sorted(targets_by_system.keys(), reverse=True)
+
+        for sys_idx in sorted_systems:
+            remove_sub_idxs = targets_by_system[sys_idx]
+            total_subs = self.get_system_subsystems_count(sys_idx)
+            
+            # Identify which indices to keep
+            keep_sub_idxs = [i for i in range(total_subs) if i not in remove_sub_idxs]
+
+            if not keep_sub_idxs:
+                # The entire system is being traced out
+                self.systems_list.pop(sys_idx)
+                # Remove keys associated with this system
+                keys_to_del = [k for k, v in self.state_index_dict.items() if v[0] == sys_idx]
+                for k in keys_to_del:
+                    del self.state_index_dict[k]
+                
+                # Shift all subsequent system indices down by 1
+                for k, (v_sys, v_sub) in self.state_index_dict.items():
+                    if v_sys > sys_idx:
+                        self.state_index_dict[k] = (v_sys - 1, v_sub)
+            else:
+                # Apply ptrace (takes list of indices to KEEP)
+                self.systems_list[sys_idx] = self.systems_list[sys_idx].ptrace(keep_sub_idxs)
+                
+                # Remove the keys we traced out
+                for key in keys:
+                    if key in self.state_index_dict and self.state_index_dict[key][0] == sys_idx:
+                        del self.state_index_dict[key]
+
+                # Update sub_idx for remaining keys in this system
+                # The new sub_idx is the rank of the old sub_idx among the kept indices
+                for k, (v_sys, v_sub) in self.state_index_dict.items():
+                    if v_sys == sys_idx:
+                        new_sub_idx = keep_sub_idxs.index(v_sub)
+                        self.state_index_dict[k] = (sys_idx, new_sub_idx)
         
     def merge_systems(self, sys1: int, sys2: int) -> None:
         if sys2 < sys1:
@@ -140,6 +197,7 @@ class StateManager:
         print(f"Raw dict: {self.state_index_dict}")
         print("---------------------------------------\n")
     
+    @profile
     def apply_operation(self, system_index: int, operator: qt.Qobj) -> None:
         system = self.systems_list[system_index]
         if system.isket:
@@ -172,6 +230,47 @@ class StateManager:
         projector = qt.tensor(*op_list)
         
         self.apply_operation(system_index, projector)
+    
+    @profile
+    def measure_subsystems(self, measurements: list[tuple[str, int]]) -> None: # https://gemini.google.com/share/8fb811e25871
+        """
+        Applies projective measurements to multiple subsystems. 
+        Measurements on the same system are applied simultaneously as a single operator.
+        """
+        if not measurements:
+            return
+
+        # 1. Group (sub_idx, outcome) by their system_index
+        # Format: { system_index: [(sub_idx, outcome), ...] }
+        by_system: dict[int, list[tuple[int, int]]] = {}
+        
+        for key, outcome in measurements:
+            if key not in self.state_index_dict:
+                raise ValueError(f"Key '{key}' not found in StateManager.")
+            
+            sys_idx, sub_idx = self.state_index_dict[key]
+            if sys_idx not in by_system:
+                by_system[sys_idx] = []
+            by_system[sys_idx].append((sub_idx, outcome))
+
+        # 2. Apply one aggregate projector per independent system
+        for sys_idx, sub_measurements in by_system.items():
+            state = self.systems_list[sys_idx]
+            dims = state.dims[0]
+            
+            # Start with identities for all subsystems in this system
+            op_list = [qt.qeye(d) for d in dims]
+            
+            # Replace identities with projectors for the targeted subsystems
+            for sub_idx, outcome in sub_measurements:
+                # Build projector |outcome><outcome|
+                op_list[sub_idx] = qt.basis(dims[sub_idx], outcome).proj()
+            
+            # Create the full tensor product projector
+            projector = qt.tensor(*op_list)
+            
+            # Apply and normalize (normalization is handled by apply_operation)
+            self.apply_operation(sys_idx, projector)
 
 
 def apply_dual_mode_encoding(sm: StateManager, qubit_key: str, mode_1_key: str, mode_2_key: str):
@@ -823,6 +922,7 @@ def repetition_encode(sm: StateManager, source_key: str, target_key_list: list[s
 #     for i in range(1, len(source_key_list)):
 #         sm.add_subsystem(2, source_key_list[i])
 
+@profile
 def repetition_decode(sm: StateManager, target_key: str, source_key_list: list[str]):
     if len(source_key_list) % 2 != 1:
         print("unsupported repetition_n_qubit_decode for n even")
@@ -863,27 +963,6 @@ def repetition_decode(sm: StateManager, target_key: str, source_key_list: list[s
             syndrome_tuple = tuple(error_syndrome)
             if(syndrome_correction_map[syndrome_tuple] == ""):
                 syndrome_correction_map[syndrome_tuple] = correction_string
-
-
-
-    # syndrome_correction_map = {
-    #     (0, 0, 0, 0): "IIIII",
-    #     (0, 0, 0, 1): "IIIIX",
-    #     (0, 0, 1, 0): "IIXII",
-    #     (0, 0, 1, 1): "IIIXI",
-    #     (0, 1, 0, 0): "XIXII",
-    #     (0, 1, 0, 1): "IIXXI",
-    #     (0, 1, 1, 0): "IIXIX",
-    #     (0, 1, 1, 1): "IIIXI",
-    #     (1, 0, 0, 0): "XIIII",
-    #     (1, 0, 0, 1): "XIIIX",
-    #     (1, 0, 1, 0): "IXIXI",
-    #     (1, 0, 1, 1): "IXIIX",
-    #     (1, 1, 0, 0): "IXIII",
-    #     (1, 1, 0, 1): "IXIIX",
-    #     (1, 1, 1, 0): "XIXIX",
-    #     (1, 1, 1, 1): "IXIXI",
-    # }
     
 
     new_systems_list: list[qt.Qobj] = []
@@ -893,9 +972,11 @@ def repetition_decode(sm: StateManager, target_key: str, source_key_list: list[s
         outcome_probability = outcome_probability.real
 
         sm_outcome = sm.clone()
-        for i in range(num_ancillas):
-            sm_outcome.measure_subsystem(anc_keys[i], outcome[i])
-            sm_outcome.ptrace_subsystem(anc_keys[i])
+        # for i in range(num_ancillas):
+        #     sm_outcome.measure_subsystem(anc_keys[i], outcome[i])
+        
+        sm_outcome.measure_subsystems(list(zip(anc_keys, outcome)))
+        sm_outcome.ptrace_subsystems(anc_keys)
 
         correction_str = syndrome_correction_map[outcome] # type: ignore
         if(correction_str == "" or correction_str == None):
@@ -1096,7 +1177,7 @@ ideal_rho = qt.ket2dm(ideal_phi_plus)
 
 
 
-
+@profile
 def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHANNEL_QUBITS: int, encoding_type: EncodingType) -> float:
     N = ph.N
 
@@ -1177,8 +1258,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_BIT_FLIP, 5),
-            (EncodingType.REPETITION_BIT_FLIP, 7),
+            (EncodingType.REPETITION_BIT_FLIP, 9),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
             #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
@@ -1189,8 +1269,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_BIT_FLIP, 5),
-            (EncodingType.REPETITION_BIT_FLIP, 7),
+            (EncodingType.REPETITION_BIT_FLIP, 9),
             #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
         ]
@@ -1200,8 +1279,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_BIT_FLIP, 5),
-            (EncodingType.REPETITION_BIT_FLIP, 7),
+            (EncodingType.REPETITION_BIT_FLIP, 9),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
             #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
@@ -1213,8 +1291,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             #(EncodingType.SHOR_9_QUBITS, 9),
             (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_BIT_FLIP, 5),
-            (EncodingType.REPETITION_BIT_FLIP, 7),
+            (EncodingType.REPETITION_BIT_FLIP, 9),
         ]
     ),
     (
@@ -1227,7 +1304,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     ),
 ]
 
-loss_prob_list = list(np.logspace(np.log10(0.05), np.log10(0.8), num=50)) + list(np.linspace(0.81, 0.99, 19))
+loss_prob_list = list(np.logspace(np.log10(0.005), np.log10(0.8), num=50)) + list(np.linspace(0.81, 0.99, 19))
 
 # Define line styles for different physical layers to distinguish them
 styles = {
