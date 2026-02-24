@@ -25,7 +25,12 @@ rc('animation', html='jshtml')
 
 
 
-
+_qeye_dict = {}
+def get_qeye(dim) -> qt.Qobj:
+    if dim not in _qeye_dict:
+        _qeye_dict[dim] = qt.qeye(dim)
+    return _qeye_dict[dim]
+                
 
 
 class StateManager:
@@ -207,29 +212,30 @@ class StateManager:
             tr = system.tr()
             if(np.abs(tr) < 1E-5):
                 tr = 1E-5
-            system = system / tr
+            if tr != 1.0:
+                system = system / tr
         self.systems_list[system_index] = system
 
 
-    def measure_subsystem(self, key: str, outcome: int) -> None:
-        """
-        Applies a projective measurement to the subsystem identified by 'key'.
-        Updates the system state and normalizes it.
-        """
-        if key not in self.state_index_dict:
-            raise ValueError(f"Key '{key}' not found in StateManager.")
+    # def measure_subsystem(self, key: str, outcome: int) -> None:
+    #     """
+    #     Applies a projective measurement to the subsystem identified by 'key'.
+    #     Updates the system state and normalizes it.
+    #     """
+    #     if key not in self.state_index_dict:
+    #         raise ValueError(f"Key '{key}' not found in StateManager.")
 
-        system_index, target_sub_idx = self.state_index_dict[key]
-        state = self.systems_list[system_index]
+    #     system_index, target_sub_idx = self.state_index_dict[key]
+    #     state = self.systems_list[system_index]
         
-        dims = state.dims[0]
+    #     dims = state.dims[0]
         
-        op_list = [qt.qeye(d) for d in dims]
-        op_list[target_sub_idx] = qt.basis(dims[target_sub_idx], outcome).proj()
+    #     op_list = [get_qeye(d) for d in dims]
+    #     op_list[target_sub_idx] = qt.basis(dims[target_sub_idx], outcome).proj()
         
-        projector = qt.tensor(*op_list)
+    #     projector = qt.tensor(*op_list)
         
-        self.apply_operation(system_index, projector)
+    #     self.apply_operation(system_index, projector)
     
     @profile
     def measure_subsystems(self, measurements: list[tuple[str, int]]) -> None: # https://gemini.google.com/share/8fb811e25871
@@ -259,7 +265,7 @@ class StateManager:
             dims = state.dims[0]
             
             # Start with identities for all subsystems in this system
-            op_list = [qt.qeye(d) for d in dims]
+            op_list = [get_qeye(d) for d in dims]
             
             # Replace identities with projectors for the targeted subsystems
             for sub_idx, outcome in sub_measurements:
@@ -317,12 +323,12 @@ def apply_single_mode_encoding(sm: StateManager, qubit_key: str, cv_key: str):
     
     # We use projectors to define the mapping
     # Projector for qubit |0> and leave CV as is (assuming vacuum)
-    op0 = [qt.qeye(d) for d in dims]
+    op0 = [get_qeye(d) for d in dims]
     op0[qubit_pos] = qt.basis(2, 0).proj()
     # op0[cv_pos] is already identity
     
     # Projector for qubit |1> and create a photon in CV, then flip qubit to 0
-    op1 = [qt.qeye(d) for d in dims]
+    op1 = [get_qeye(d) for d in dims]
     op1[qubit_pos] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
     op1[cv_pos] = qt.create(N_cv) 
 
@@ -345,12 +351,12 @@ def apply_single_mode_decoding(sm: StateManager, qubit_key: str, cv_key: str):
     N_cv = dims[cv_pos]
 
     # Map CV |0> to qubit |0>
-    op0 = [qt.qeye(d) for d in dims]
+    op0 = [get_qeye(d) for d in dims]
     op0[qubit_pos] = qt.basis(2, 0).proj()
     op0[cv_pos] = qt.basis(N_cv, 0).proj()
 
     # Map CV |1> to qubit |1>
-    op1 = [qt.qeye(d) for d in dims]
+    op1 = [get_qeye(d) for d in dims]
     op1[qubit_pos] = qt.basis(2, 1) @ qt.basis(2, 0).dag()
     op1[cv_pos] = qt.basis(2, 0) @ qt.basis(N_cv, 1).dag() # Map Fock 1 to Fock 0
 
@@ -384,7 +390,7 @@ def apply_cat_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, vert
     num_subsystems = len(dims)
 
     def build_gate(qubit_state_index: int) -> qt.Qobj:
-        op_list = [qt.qeye(dims[i]) for i in range(num_subsystems)]
+        op_list = [get_qeye(dims[i]) for i in range(num_subsystems)]
         
         if qubit_state_index == 0:
             # Map: |0>_q |vac>_cv  ->  |0>_q |cat+>_cv
@@ -425,11 +431,11 @@ def apply_ideal_cat_state_decoding(sm: StateManager, qubit_key: str, cv_key: str
     # This maps: |cat+>|0> -> |cat+>|0>  AND  |cat->|0> -> |cat->|1>
     def build_flip():
         # Project CV onto Parity, apply corresponding gate to Qubit
-        op_plus = [qt.qeye(d) for d in dims]
+        op_plus = [get_qeye(d) for d in dims]
         op_plus[cv_position] = logical_zero_cv.proj()
         # Qubit stays same (Identity)
         
-        op_minus = [qt.qeye(d) for d in dims]
+        op_minus = [get_qeye(d) for d in dims]
         op_minus[cv_position] = logical_one_cv.proj()
         op_minus[qubit_position] = qt.sigmax() # Flip if odd parity
         
@@ -440,11 +446,11 @@ def apply_ideal_cat_state_decoding(sm: StateManager, qubit_key: str, cv_key: str
     # Note: This is essentially the inverse of your encoding function.
     def build_clean():
         # This part ensures the operation is unitary by resetting the CV mode
-        op_zero = [qt.qeye(d) for d in dims]
+        op_zero = [get_qeye(d) for d in dims]
         op_zero[qubit_position] = qt.basis(2, 0).proj()
         op_zero[cv_position] = vacuum @ logical_zero_cv.dag()
         
-        op_one = [qt.qeye(d) for d in dims]
+        op_one = [get_qeye(d) for d in dims]
         op_one[qubit_position] = qt.basis(2, 1).proj()
         op_one[cv_position] = vacuum @ logical_one_cv.dag()
         
@@ -470,11 +476,11 @@ def apply_kitten_state_encoding(sm: StateManager, qubit_key: str, cv_key: str, N
     map_zero = logical_zero @ qt.basis(N, 0).dag()
     map_one  = logical_one @ qt.basis(N, 0).dag()
 
-    op0 = [qt.qeye(d) for d in dims]
+    op0 = [get_qeye(d) for d in dims]
     op0[qubit_pos] = qt.basis(2, 0).proj()
     op0[cv_pos] = map_zero
 
-    op1 = [qt.qeye(d) for d in dims]
+    op1 = [get_qeye(d) for d in dims]
     op1[qubit_pos] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
     op1[cv_pos] = map_one
 
@@ -498,7 +504,7 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
     parity_check = 0
     for n in range(N):
         proj_n = qt.basis(N, n).proj()
-        op_list = [qt.qeye(d) for d in dims]
+        op_list = [get_qeye(d) for d in dims]
         op_list[cv_pos] = proj_n
         if n % 2 != 0:
             op_list[anc_pos] = qt.sigmax()
@@ -518,7 +524,7 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
     P_e0 = e0 @ e0.dag()
     P_e1 = e1 @ e1.dag()
 
-    I_cv = qt.qeye(N)
+    I_cv = get_qeye(N)
     P_sub = P_l0 + P_l1 + P_e0 + P_e1
     P_perp = I_cv - P_sub
 
@@ -530,11 +536,11 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
         + P_perp
     )
 
-    op_list_no_err = [qt.qeye(d) for d in dims]
+    op_list_no_err = [get_qeye(d) for d in dims]
     op_list_no_err[anc_pos] = qt.basis(2, 0).proj()
     term_no_err = qt.tensor(*op_list_no_err)
 
-    op_list_err = [qt.qeye(d) for d in dims]
+    op_list_err = [get_qeye(d) for d in dims]
     op_list_err[anc_pos] = qt.basis(2, 1).proj()
     op_list_err[cv_pos] = U_corr_cv
     term_err = qt.tensor(*op_list_err)
@@ -556,11 +562,11 @@ def apply_kitten_state_decoding(sm: StateManager, qubit_key: str, cv_key: str, N
     l1 = qt.basis(N, 2)
     vac = qt.basis(N, 0)
 
-    op_map0 = [qt.qeye(d) for d in dims]
+    op_map0 = [get_qeye(d) for d in dims]
     op_map0[qubit_pos] = qt.basis(2, 0).proj()
     op_map0[cv_pos] = vac @ l0.dag()
 
-    op_map1 = [qt.qeye(d) for d in dims]
+    op_map1 = [get_qeye(d) for d in dims]
     op_map1[qubit_pos] = qt.basis(2, 1) @ qt.basis(2, 0).dag()
     op_map1[cv_pos] = vac @ l1.dag()
 
@@ -588,11 +594,11 @@ def apply_4_legged_cat_encoding(sm: StateManager, qubit_key: str, cv_key: str, a
     map_zero = logical_zero @ vac.dag()
     map_one  = logical_one @ vac.dag()
 
-    op0 = [qt.qeye(d) for d in dims]
+    op0 = [get_qeye(d) for d in dims]
     op0[qubit_pos] = qt.basis(2, 0).proj()
     op0[cv_pos] = map_zero
 
-    op1 = [qt.qeye(d) for d in dims]
+    op1 = [get_qeye(d) for d in dims]
     op1[qubit_pos] = qt.basis(2, 0) @ qt.basis(2, 1).dag()
     op1[cv_pos] = map_one
 
@@ -617,7 +623,7 @@ def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, a
     parity_check = 0
     for n in range(N):
         proj_n = qt.basis(N, n).proj()
-        op_list = [qt.qeye(d) for d in dims]
+        op_list = [get_qeye(d) for d in dims]
         op_list[cv_pos] = proj_n
         if n % 2 != 0:
             op_list[anc_pos] = qt.sigmax()
@@ -638,13 +644,13 @@ def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, a
     P_l0 = l0 @ l0.dag()
     P_l1 = l1 @ l1.dag()
     
-    I_cv = qt.qeye(N)
+    I_cv = get_qeye(N)
     U_corr_cv = (l0 @ e0.dag()) + (l1 @ e1.dag()) + (e0 @ l0.dag()) + (e1 @ l1.dag()) + (I_cv - P_e0 - P_e1 - P_l0 - P_l1)
 
-    op_list_no_err = [qt.qeye(d) for d in dims]
+    op_list_no_err = [get_qeye(d) for d in dims]
     op_list_no_err[anc_pos] = qt.basis(2, 0).proj()
     
-    op_list_err = [qt.qeye(d) for d in dims]
+    op_list_err = [get_qeye(d) for d in dims]
     op_list_err[anc_pos] = qt.basis(2, 1).proj()
     op_list_err[cv_pos] = U_corr_cv
     
@@ -660,11 +666,11 @@ def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, a
     system = sm.systems_list[sys_idx]
     dims = system.dims[0]
 
-    op_map0 = [qt.qeye(d) for d in dims]
+    op_map0 = [get_qeye(d) for d in dims]
     op_map0[qubit_pos] = qt.basis(2, 0).proj()
     op_map0[cv_pos] = vac @ l0.dag()
 
-    op_map1 = [qt.qeye(d) for d in dims]
+    op_map1 = [get_qeye(d) for d in dims]
     op_map1[qubit_pos] = qt.basis(2, 1) @ qt.basis(2, 0).dag()
     op_map1[cv_pos] = vac @ l1.dag()
 
@@ -697,7 +703,7 @@ def apply_kraus_loss(
 
     eta_n: qt.Qobj = (0.5 * np.log(eta) * n).expm()
 
-    id_ops = [qt.qeye(d) for d in dims]
+    id_ops = [get_qeye(d) for d in dims]
     rho_out = 0 * system
 
     for k in range(k_max + 1):
@@ -716,16 +722,15 @@ def apply_kraus_loss(
 
     sm.systems_list[system_index] = rho_out
 
+@profile
 def apply_qubit_gate(sm: StateManager, target_key: str, gate: qt.Qobj):
     system_index, target_idx = sm.state_index_dict[target_key]
     
     system = sm.systems_list[system_index]
     dims = system.dims[0]
-    
-    op_list = [qt.qeye(d) for d in dims]
-    op_list[target_idx] = gate
-    
-    X_total = qt.tensor(*op_list)
+
+    l = [get_qeye(dims[i]) if i != target_idx else gate for i in range(len(dims))]
+    X_total = qt.tensor(*l)
     sm.apply_operation(system_index, X_total)
 
 def apply_x(sm: StateManager, target_key: str):
@@ -750,12 +755,12 @@ def apply_cnot(sm: StateManager, control_key: str, target_key: str):
     dims = system.dims[0]
     
     # Part 1: Control is in |0> (Identity on target)
-    op_list_0 = [qt.qeye(d) for d in dims]
+    op_list_0 = [get_qeye(d) for d in dims]
     op_list_0[control_idx] = qt.basis(2, 0).proj()
     # Target stays Identity, so no change needed to op_list_0
     
     # Part 2: Control is in |1> (X on target)
-    op_list_1 = [qt.qeye(d) for d in dims]
+    op_list_1 = [get_qeye(d) for d in dims]
     op_list_1[control_idx] = qt.basis(2, 1).proj()
     op_list_1[target_idx] = qt.sigmax()
     
@@ -777,11 +782,11 @@ def apply_cz(sm: StateManager, control_key: str, target_key: str):
     dims = system.dims[0]
 
     # Control in |0>
-    op_list_0 = [qt.qeye(d) for d in dims]
+    op_list_0 = [get_qeye(d) for d in dims]
     op_list_0[control_idx] = qt.basis(2, 0).proj()
 
     # Control in |1>
-    op_list_1 = [qt.qeye(d) for d in dims]
+    op_list_1 = [get_qeye(d) for d in dims]
     op_list_1[control_idx] = qt.basis(2, 1).proj()
     op_list_1[target_idx] = qt.sigmaz()
 
@@ -810,17 +815,17 @@ def apply_toffoli(sm: StateManager, ctrl1_key: str, ctrl2_key: str, target_key: 
     dims = system.dims[0]
 
     # Identity on all subsystems
-    op_list_id = [qt.qeye(d) for d in dims]
+    op_list_id = [get_qeye(d) for d in dims]
     
     # The Toffoli gate: I + |11><11| ⊗ (X - I)
     # This only acts when both controls are in the |1> state
-    proj_11 = [qt.qeye(d) for d in dims]
+    proj_11 = [get_qeye(d) for d in dims]
     proj_11[ctrl1] = qt.basis(2, 1).proj()
     proj_11[ctrl2] = qt.basis(2, 1).proj()
     
     # The operator (X - I) on the target
-    op_x_minus_i = [qt.qeye(d) for d in dims]
-    op_x_minus_i[target] = qt.sigmax() - qt.qeye(2)
+    op_x_minus_i = [get_qeye(d) for d in dims]
+    op_x_minus_i[target] = qt.sigmax() - get_qeye(2)
     
     # Combine: U = Identity + (Projector_11 * Target_Flip_Logic)
     # We use element-wise multiplication of the lists to build the tensor components
@@ -1260,7 +1265,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             (EncodingType.REPETITION_BIT_FLIP, 3),
             (EncodingType.REPETITION_BIT_FLIP, 9),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
         ]
     ),
@@ -1268,8 +1273,8 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT, N=18, vertical_displacement=1.5), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_BIT_FLIP, 9),
+            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            #(EncodingType.REPETITION_BIT_FLIP, 9),
             #(EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
         ]
@@ -1281,7 +1286,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             (EncodingType.REPETITION_BIT_FLIP, 3),
             (EncodingType.REPETITION_BIT_FLIP, 9),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
         ]
     ),
@@ -1290,8 +1295,8 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             #(EncodingType.SHOR_9_QUBITS, 9),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_BIT_FLIP, 9),
+            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            #(EncodingType.REPETITION_BIT_FLIP, 9),
         ]
     ),
     (
@@ -1299,12 +1304,12 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             #(EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.SHOR_9_QUBITS, 9),
+            #(EncodingType.SHOR_9_QUBITS, 9),
         ]
     ),
 ]
 
-loss_prob_list = list(np.logspace(np.log10(0.005), np.log10(0.8), num=50)) + list(np.linspace(0.81, 0.99, 19))
+loss_prob_list = list(np.logspace(np.log10(0.01), np.log10(0.8), num=10)) + list(np.linspace(0.81, 0.99, 9))
 
 # Define line styles for different physical layers to distinguish them
 styles = {
