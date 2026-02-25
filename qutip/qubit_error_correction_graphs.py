@@ -48,13 +48,15 @@ class StateManager:
         self.systems_list += [new_system]
         self.state_index_dict[key] = (system_index, 0)
     
+    @profile
     def get_system_subsystems_count(self, system_index: int) -> int:
         count = 0
         for (sys_idx, sub_idx) in self.state_index_dict.values():
             if sys_idx == system_index:
                 count += 1
         return count
-
+    
+    @profile
     def ptrace_subsystem(self, key: str) -> None:
         system_index, target_subsystem_index = self.state_index_dict[key]
         prev_subsystem_count = self.get_system_subsystems_count(system_index)
@@ -153,6 +155,7 @@ class StateManager:
         if(sys1 != sys2):
             self.merge_systems(sys1, sys2)
     
+    @profile
     def ptrace_keep(self, keep_key_list: list[str]) -> qt.Qobj:
         """
         The list is used for the reordering of the returned density matrix, but the system index mappings are not
@@ -161,10 +164,8 @@ class StateManager:
         for i in range(1, len(keep_key_list)):
             k = keep_key_list[i]
             self.ensure_same_system(keep_key_list[0], k)
-        starting_key_list = list(self.state_index_dict.keys())
-        for k in starting_key_list:
-            if k not in keep_key_list:
-                self.ptrace_subsystem(k)
+        keys_to_remove = [k for k in self.state_index_dict if k not in keep_key_list]
+        self.ptrace_subsystems(keys_to_remove)  
         assert len(self.systems_list) == 1
         to_return = qt.ket2dm(self.systems_list[0]) if self.systems_list[0].isket else self.systems_list[0]
         new_order_list: list[int] = []
@@ -606,6 +607,7 @@ def apply_4_legged_cat_encoding(sm: StateManager, qubit_key: str, cv_key: str, a
     
     sm.apply_operation(system_index, U_encode)
 
+@profile
 def apply_4_legged_cat_decoding(sm: StateManager, qubit_key: str, cv_key: str, alpha: complex, N: int):
     sm.ensure_same_system(qubit_key, cv_key)
     anc_key = "cat_decoding_ancilla"
@@ -722,7 +724,6 @@ def apply_kraus_loss(
 
     sm.systems_list[system_index] = rho_out
 
-@profile
 def apply_qubit_gate(sm: StateManager, target_key: str, gate: qt.Qobj):
     system_index, target_idx = sm.state_index_dict[target_key]
     
@@ -1262,8 +1263,8 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         PhyLayerConfiguration(channel_type=ChannelType.CV_KITTEN, N=5), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_BIT_FLIP, 9),
+            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            #(EncodingType.REPETITION_BIT_FLIP, 9),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
             (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
@@ -1275,7 +1276,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             #(EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.REPETITION_BIT_FLIP, 9),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
         ]
     ),
@@ -1283,8 +1284,8 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         PhyLayerConfiguration(channel_type=ChannelType.CV_CAT_4, N=20, alpha=1.5), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
-            (EncodingType.REPETITION_BIT_FLIP, 9),
+            #(EncodingType.REPETITION_BIT_FLIP, 3),
+            #(EncodingType.REPETITION_BIT_FLIP, 9),
             #(EncodingType.REPETITION_PHASE_FLIP, 3),
             (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
@@ -1294,7 +1295,7 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE), 
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
             #(EncodingType.REPETITION_BIT_FLIP, 3),
             #(EncodingType.REPETITION_BIT_FLIP, 9),
         ]
@@ -1304,12 +1305,12 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
         [
             #(EncodingType.SWAP_DUMMY_ENCODING, 1),
             #(EncodingType.REPETITION_BIT_FLIP, 3),
-            #(EncodingType.SHOR_9_QUBITS, 9),
+            (EncodingType.SHOR_9_QUBITS, 9),
         ]
     ),
 ]
 
-loss_prob_list = list(np.logspace(np.log10(0.01), np.log10(0.8), num=10)) + list(np.linspace(0.81, 0.99, 9))
+loss_prob_list = list(np.logspace(np.log10(0.05), np.log10(0.8), num=10)) + list(np.linspace(0.81, 0.99, 9))
 
 # Define line styles for different physical layers to distinguish them
 styles = {
