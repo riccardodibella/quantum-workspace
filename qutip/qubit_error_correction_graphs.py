@@ -1441,7 +1441,7 @@ ideal_rho = qt.ket2dm(ideal_phi_plus)
 
 
 @profile
-def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHANNEL_QUBITS: int, encoding_type: EncodingType) -> float:
+def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHANNEL_QUBITS: int, encoding_type: EncodingType) -> tuple[float, float]:
     N = ph.N
 
     sm = StateManager()
@@ -1510,7 +1510,10 @@ def run_fidelity_simulation(ph: PhyLayerConfiguration, loss_prob: float, NUM_CHA
 
     edge_qubits = sm.ptrace_keep(["tx_edge", "rx_edge"]).unit()
     fid = qt.fidelity(edge_qubits, ideal_rho)
-    return fid
+
+    conc = qt.concurrence(edge_qubits)
+
+    return fid, conc
 
 
 
@@ -1521,10 +1524,11 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     #     [
     #         (EncodingType.SWAP_DUMMY_ENCODING, 1),
     #         (EncodingType.REPETITION_BIT_FLIP, 3),
-    #         (EncodingType.REPETITION_BIT_FLIP, 9),
-    #         (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
+    #         # (EncodingType.REPETITION_BIT_FLIP, 9),
+    #         # (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
     #         (EncodingType.SHOR, 9),
     #         (EncodingType.FIVE_QUBIT, 5),
+    #         (EncodingType.STEANE, 7),
     #     ]
     # ),
     # (
@@ -1549,29 +1553,29 @@ phy_config_list: list[tuple[PhyLayerConfiguration, list[tuple[EncodingType, int]
     #         (EncodingType.FIVE_QUBIT, 5),
     #     ]
     # ),
-    (
-        PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE), 
-        [
-            (EncodingType.SWAP_DUMMY_ENCODING, 1),
-            (EncodingType.REPETITION_BIT_FLIP, 3),
-            # (EncodingType.REPETITION_BIT_FLIP, 9),
-            # (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
-            (EncodingType.SHOR, 9),
-            (EncodingType.FIVE_QUBIT, 5),
-            (EncodingType.STEANE, 7),
-        ]
-    ),
     # (
-    #     PhyLayerConfiguration(channel_type=ChannelType.DV_DUAL_MODE_MIXED), 
+    #     PhyLayerConfiguration(channel_type=ChannelType.DV_SINGLE_MODE), 
     #     [
     #         (EncodingType.SWAP_DUMMY_ENCODING, 1),
+    #         (EncodingType.REPETITION_BIT_FLIP, 3),
+    #         # (EncodingType.REPETITION_BIT_FLIP, 9),
+    #         # (EncodingType.REPETITION_BIT_FLIP_WRAP, 9),
     #         (EncodingType.SHOR, 9),
     #         (EncodingType.FIVE_QUBIT, 5),
+    #         (EncodingType.STEANE, 7),
     #     ]
     # ),
+    (
+        PhyLayerConfiguration(channel_type=ChannelType.DV_DUAL_MODE_MIXED), 
+        [
+            (EncodingType.SWAP_DUMMY_ENCODING, 1),
+            (EncodingType.SHOR, 9),
+            (EncodingType.FIVE_QUBIT, 5),
+        ]
+    ),
 ]
 
-loss_prob_list = list(np.logspace(np.log10(0.05), np.log10(0.8), num=10)) + list(np.linspace(0.81, 0.99, 4))
+loss_prob_list = list(np.logspace(np.log10(0.05), np.log10(0.25), num=5)) + list(np.linspace(0.26, 0.99, 20))
 
 # Define line styles for different physical layers to distinguish them
 styles = {
@@ -1600,44 +1604,57 @@ for phy_config, codes in phy_config_list:
 
     for encoding_type, num_qubits in codes:
         fidelities = []
+        concurrences = []
         label = f"[{mode_name}] {encoding_type.name} ({num_qubits} qubits)"
 
         print(f"\tencoding_type: {encoding_type.name} ({num_qubits} qubits)")
 
         for loss_prob in loss_prob_list:
             print(f"\t\tloss_prob: {loss_prob}")
-            fid = run_fidelity_simulation(
+            fid, conc = run_fidelity_simulation(
                 ph=phy_config,
                 loss_prob=loss_prob,
                 NUM_CHANNEL_QUBITS=num_qubits,
                 encoding_type=encoding_type
             )
             fidelities.append(fid)
+            concurrences.append(conc)
 
         # Save results for plotting
-        results.append((loss_prob_list, fidelities, ls, label))
+        results.append((loss_prob_list, fidelities, concurrences, ls, label))
 
 # ------------------------
 # Log-Log Plot
 plt.figure()
-for x, y, ls, label in results:
+for x, y, y2, ls, label in results:
     plt.loglog(x, 1-np.array(y), ls=ls, label=label)
 
 plt.xlabel('Loss Probability')
 plt.ylabel('Infidelity')
-plt.title('Infidelity vs Channel Loss (Log-Log)')
+plt.title('Infidelity vs Channel Loss (Log-Log Scale)')
 plt.legend()
 plt.grid(True, which="both", ls="--", alpha=0.6)
 
 # ------------------------
 # Linear Plot
 plt.figure()
-for x, y, ls, label in results:
+for x, y, y2, ls, label in results:
     plt.plot(x, y, ls=ls, label=label)
 
 plt.xlabel('Loss Probability')
 plt.ylabel('Fidelity')
 plt.title('Fidelity vs Channel Loss (Linear Scale)')
+plt.legend()
+plt.grid(True, ls="--", alpha=0.6)
+
+
+plt.figure()
+for x, y, y2, ls, label in results:
+    plt.plot(x, y2, ls=ls, label=label)
+
+plt.xlabel('Loss Probability')
+plt.ylabel('Concurrence')
+plt.title('Concurrence vs Channel Loss (Linear Scale)')
 plt.legend()
 plt.grid(True, ls="--", alpha=0.6)
 
