@@ -115,12 +115,14 @@ class IPNetworkNode(Node):
 
 class AckPingProtocol(NodeProtocol):
     def __init__(self, node):
-        if not isinstance(node, IPNetworkNode):
-            raise TypeError("Node is not IP")
         super().__init__(node)
+        if not isinstance(self.node, IPNetworkNode):
+            raise TypeError("Node is not IP")
 
 
     def run(self):
+        if not isinstance(self.node, IPNetworkNode):
+            raise TypeError("Node is not IP")
         tx_rx_port = self.node.ports[self.node.interface_names[0]]
         while True:
             yield self.await_port_input(tx_rx_port)
@@ -140,8 +142,6 @@ class SendPingProtocol(NodeProtocol):
         super().__init__(node)
         if not isinstance(self.node, IPNetworkNode):
             raise TypeError("Node is not IP")
-        print(node.if_configs)
-        print(node.routing_table)
 
     def run(self):
         if not isinstance(self.node, IPNetworkNode):
