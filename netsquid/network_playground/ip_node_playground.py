@@ -43,7 +43,7 @@ def find_forward_interface(ip: ipaddress.IPv4Address, routes: list[RoutingTableE
 
 def is_ip_addr_local(addr: ipaddress.IPv4Address, ifs: list[InterfaceConfig]) -> bool:
     for i in ifs:
-        if addr.packed == i.conf.ip.packed:
+        if addr == i.conf.ip:
             return True
     return False
 
@@ -181,13 +181,26 @@ class SendPingProtocol(NodeProtocol):
         
         tx_rx_port = self.node.ports[self.node.interface_names[0]]
         icmp = make_ICMP_Echo_Request()
-        ip = IPv4Packet(ipaddress.IPv4Interface("192.168.1.1"), ipaddress.IPv4Interface("192.168.1.6"), IPProto.ICMP, icmp, icmp.total_length)
+        ip = IPv4Packet(ipaddress.IPv4Address("192.168.1.1"), ipaddress.IPv4Address("192.168.1.6"), IPProto.ICMP, icmp, icmp.total_length)
         tx_rx_port.tx_output(ip)
 
         yield self.await_port_input(tx_rx_port)
         end_time = ns.sim_time()
         print(f"[{end_time:.2f} ns] {self.node.name} received ACK. Round trip: {end_time - start_time:.2f} ns")
 
+def connect_nodes(node_a, node_b, port_a, port_b, distance: float):
+    """Utility to bridge two nodes with a standard classical connection."""
+    delay_model = FibreDelayModel()
+    
+    # Create channels
+    c_abc = ClassicalChannel(f"ch_{node_a.name}_{node_b.name}", length=distance, models={"delay_model": delay_model})
+    c_bac = ClassicalChannel(f"ch_{node_b.name}_{node_a.name}", length=distance, models={"delay_model": delay_model})
+    
+    # Create connection
+    conn = DirectConnection(f"conn_{node_a.name}_{node_b.name}", channel_AtoB=c_abc, channel_BtoA=c_bac)
+    
+    # Connect
+    node_a.connect_to(remote_node=node_b, connection=conn, local_port_name=port_a, remote_port_name=port_b)
 
 if __name__ == "__main__":
     node_a_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.1.1/30"))]
@@ -209,18 +222,8 @@ if __name__ == "__main__":
     int_node = IPNetworkNode("int", node_int_ifs, node_int_routing_table)
     rep_node = IPNetworkNode("rep", node_b_ifs, node_b_routing_table)
 
-    distance = 1 #km
-    fibre_delay_model = FibreDelayModel()
-
-    cmd_channel_1 = ClassicalChannel("cl1", length=distance, models={"delay_model": fibre_delay_model})
-    ack_channel_1 = ClassicalChannel("cl2", length=distance, models={"delay_model": fibre_delay_model})
-    cmd_channel_2 = ClassicalChannel("cl3", length=distance, models={"delay_model": fibre_delay_model})
-    ack_channel_2 = ClassicalChannel("cl4", length=distance, models={"delay_model": fibre_delay_model})
-
-    c_connection_1 = DirectConnection("c_conn_1", channel_AtoB=cmd_channel_1, channel_BtoA=ack_channel_1)
-    c_connection_2 = DirectConnection("c_conn_2", channel_AtoB=cmd_channel_2, channel_BtoA=ack_channel_2)
-    req_node.connect_to(remote_node=int_node, connection=c_connection_1, local_port_name=req_node.interface_names[0], remote_port_name=int_node.interface_names[0])
-    int_node.connect_to(remote_node=rep_node, connection=c_connection_2, local_port_name=int_node.interface_names[1], remote_port_name=rep_node.interface_names[0])
+    connect_nodes(req_node, int_node, req_node.interface_names[0], int_node.interface_names[0], 1)
+    connect_nodes(int_node, rep_node, int_node.interface_names[1], rep_node.interface_names[0], 1)
 
     loc_pr = SendPingProtocol(req_node)
     int_pr = PassiveRouterProtocol(int_node)
