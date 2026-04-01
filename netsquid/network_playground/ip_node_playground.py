@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from enum import IntEnum
+from functools import reduce
 import ipaddress
 import copy
+from operator import or_
 
 @dataclass
 class InterfaceConfig:
@@ -31,13 +33,19 @@ def find_next_hop_interface(next_hop_ip: ipaddress.IPv4Address, ifs: list[Interf
     return None
 
 def find_forward_interface(ip: ipaddress.IPv4Address, routes: list[RoutingTableEntry], ints: list[InterfaceConfig]) -> InterfaceConfig | None:
-    # TODO we should also check if the destination is a local address (the address of one of the interfaces), and in that case return None 
+    if is_ip_addr_local(ip, ints):
+        return None
     route = find_route(ip, routes)
     if route is not None:
         return find_next_hop_interface(route.next_hop, ints)
     return None
 
 
+def is_ip_addr_local(addr: ipaddress.IPv4Address, ifs: list[InterfaceConfig]) -> bool:
+    for i in ifs:
+        if addr.packed == i.conf.ip.packed:
+            return True
+    return False
 
 class IPProto(IntEnum):
     ICMP = 1        # Internet Control Message Protocol
@@ -51,7 +59,7 @@ class IPv4Packet:
     payload_proto: IPProto
     payload: any = None
     payload_length: int = 0
-    ttl: int = 255
+    ttl: int = 64
     # Identification, Flags, Fragment Offset not used because IP fragmentation is ignored
     # Type of Service is ignored for now
     # Options are ignored for now
@@ -82,7 +90,8 @@ def make_ICMP_Echo_Reply(echo_request: ICMPPacket) -> ICMPPacket:
     reply.type = ICMPType.ECHO_REP
     return reply
 
-
+def is_packet_destination_local(ip: IPv4Packet, ifs: list[InterfaceConfig]) -> bool:
+    return is_ip_addr_local(ip.dst, ifs)
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -113,7 +122,7 @@ class IPNetworkNode(Node):
         return to_return
 
 
-class AckPingProtocol(NodeProtocol):
+class PassiveRouterProtocol(NodeProtocol):
     def __init__(self, node):
         super().__init__(node)
         if not isinstance(self.node, IPNetworkNode):
@@ -123,18 +132,39 @@ class AckPingProtocol(NodeProtocol):
     def run(self):
         if not isinstance(self.node, IPNetworkNode):
             raise TypeError("Node is not IP")
-        tx_rx_port = self.node.ports[self.node.interface_names[0]]
+        ports = [self.node.ports[name] for name in self.node.interface_names]
         while True:
-            yield self.await_port_input(tx_rx_port)
-            # Get current time in nanoseconds
-            arrival_time = ns.sim_time() 
-            in_pkt = tx_rx_port.rx_input().items[0]
-            print(f"[{arrival_time:.2f} ns] {self.node.name} received something")
+            combined_input_event = reduce(or_, [self.await_port_input(p) for p in ports])
+        
+            yield combined_input_event
 
-            assert isinstance(in_pkt, IPv4Packet)
-            assert isinstance(in_pkt.payload, ICMPPacket)
-            out_pkt = IPv4Packet(in_pkt.dst, in_pkt.src, IPProto.ICMP, make_ICMP_Echo_Reply(in_pkt.payload))
-            tx_rx_port.tx_output(out_pkt)
+            for port in ports:
+                rx = port.rx_input()
+                if rx is None:
+                    continue
+                for in_pkt in rx.items:
+                    assert isinstance(in_pkt, IPv4Packet)
+
+                    if is_packet_destination_local(in_pkt, self.node.if_configs):
+                        print(f"Router {self.node.name} local dst {in_pkt.dst}")
+                        if isinstance(in_pkt.payload, ICMPPacket):
+                            icmp = in_pkt.payload
+                            if icmp.type == ICMPType.ECHO_MSG:
+                                out_pkt = IPv4Packet(in_pkt.dst, in_pkt.src, IPProto.ICMP, make_ICMP_Echo_Reply(in_pkt.payload))
+                                next_hop_int = find_forward_interface(out_pkt.dst, self.node.routing_table, self.node.if_configs)
+                                if next_hop_int is not None:
+                                    self.node.ports[next_hop_int.name].tx_output(out_pkt)
+                    else:
+                        next_hop_int = find_forward_interface(in_pkt.dst, self.node.routing_table, self.node.if_configs)
+                        if next_hop_int is not None:
+                            in_pkt.ttl -= 1
+                            if in_pkt.ttl > 0:
+                                print(f"Router {self.node.name} fwd to interface {next_hop_int.name}")
+                                self.node.ports[next_hop_int.name].tx_output(in_pkt)
+                            else:
+                                print(f"Packet dropped at node {self.node.name} (TTL expired)")
+                        else:
+                            print(f"Packet dropped at node {self.node.name} (Routing failed)")
 
 
 class SendPingProtocol(NodeProtocol):
@@ -151,7 +181,7 @@ class SendPingProtocol(NodeProtocol):
         
         tx_rx_port = self.node.ports[self.node.interface_names[0]]
         icmp = make_ICMP_Echo_Request()
-        ip = IPv4Packet(ipaddress.IPv4Interface("192.168.1.1"), ipaddress.IPv4Interface("192.168.1.2"), IPProto.ICMP, icmp, icmp.total_length)
+        ip = IPv4Packet(ipaddress.IPv4Interface("192.168.1.1"), ipaddress.IPv4Interface("192.168.1.6"), IPProto.ICMP, icmp, icmp.total_length)
         tx_rx_port.tx_output(ip)
 
         yield self.await_port_input(tx_rx_port)
@@ -161,29 +191,43 @@ class SendPingProtocol(NodeProtocol):
 
 if __name__ == "__main__":
     node_a_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.1.1/30"))]
-    node_a_routing_table = [RoutingTableEntry(ipaddress.IPv4Network("192.168.1.0/30"), ipaddress.IPv4Address("192.168.1.2"))]
+    node_a_routing_table = [RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.1.2"))]
 
-    node_b_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.1.2/30"))]
-    node_b_routing_table = [RoutingTableEntry(ipaddress.IPv4Network("192.168.1.0/30"), ipaddress.IPv4Address("192.168.1.1"))]
+    node_int_ifs = [
+        InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.1.2/30")), 
+        InterfaceConfig("eht1", ipaddress.IPv4Interface("192.168.1.5/30"))
+        ]
+    node_int_routing_table = [
+        RoutingTableEntry(ipaddress.IPv4Network("192.168.1.0/30"), ipaddress.IPv4Address("192.168.1.1")),
+        RoutingTableEntry(ipaddress.IPv4Network("192.168.1.4/30"), ipaddress.IPv4Address("192.168.1.6"))
+        ]
 
-    print(find_forward_interface(ipaddress.IPv4Address("192.168.1.2"), node_b_routing_table, node_b_ifs))
+    node_b_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.1.6/30"))]
+    node_b_routing_table = [RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.1.5"))]
 
     req_node = IPNetworkNode("req", node_a_ifs, node_a_routing_table)
+    int_node = IPNetworkNode("int", node_int_ifs, node_int_routing_table)
     rep_node = IPNetworkNode("rep", node_b_ifs, node_b_routing_table)
 
     distance = 1 #km
     fibre_delay_model = FibreDelayModel()
 
-    cmd_channel = ClassicalChannel("cl1", length=distance, models={"delay_model": fibre_delay_model})
-    ack_channel = ClassicalChannel("cl2", length=distance, models={"delay_model": fibre_delay_model})
+    cmd_channel_1 = ClassicalChannel("cl1", length=distance, models={"delay_model": fibre_delay_model})
+    ack_channel_1 = ClassicalChannel("cl2", length=distance, models={"delay_model": fibre_delay_model})
+    cmd_channel_2 = ClassicalChannel("cl3", length=distance, models={"delay_model": fibre_delay_model})
+    ack_channel_2 = ClassicalChannel("cl4", length=distance, models={"delay_model": fibre_delay_model})
 
-    c_connection = DirectConnection("c_conn", channel_AtoB=cmd_channel, channel_BtoA=ack_channel)
-    req_node.connect_to(remote_node=rep_node, connection=c_connection, local_port_name=req_node.interface_names[0], remote_port_name=req_node.interface_names[0])
+    c_connection_1 = DirectConnection("c_conn_1", channel_AtoB=cmd_channel_1, channel_BtoA=ack_channel_1)
+    c_connection_2 = DirectConnection("c_conn_2", channel_AtoB=cmd_channel_2, channel_BtoA=ack_channel_2)
+    req_node.connect_to(remote_node=int_node, connection=c_connection_1, local_port_name=req_node.interface_names[0], remote_port_name=int_node.interface_names[0])
+    int_node.connect_to(remote_node=rep_node, connection=c_connection_2, local_port_name=int_node.interface_names[1], remote_port_name=rep_node.interface_names[0])
 
     loc_pr = SendPingProtocol(req_node)
-    rem_pr = AckPingProtocol(rep_node)
+    int_pr = PassiveRouterProtocol(int_node)
+    rem_pr = PassiveRouterProtocol(rep_node)
 
     rem_pr.start()
+    int_pr.start()
     loc_pr.start()
     run_stats = ns.sim_run()
 
