@@ -1,9 +1,12 @@
+# pyright: basic
+
 from dataclasses import dataclass
 from enum import IntEnum
 from functools import reduce
 import ipaddress
 import copy
 from operator import or_
+from typing import Any
 
 @dataclass
 class InterfaceConfig:
@@ -57,7 +60,7 @@ class IPv4Packet:
     src: ipaddress.IPv4Address
     dst: ipaddress.IPv4Address
     payload_proto: IPProto
-    payload: any = None
+    payload: Any | None = None
     payload_length: int = 0
     ttl: int = 64
     # Identification, Flags, Fragment Offset not used because IP fragmentation is ignored
@@ -67,6 +70,9 @@ class IPv4Packet:
     @property
     def total_length(self) -> int:
         return 20 + self.payload_length # Options not supported
+
+def is_packet_destination_local(ip: IPv4Packet, ifs: list[InterfaceConfig]) -> bool:
+    return is_ip_addr_local(ip.dst, ifs)
 
 class ICMPType(IntEnum):
     ECHO_MSG = 8    # ICMP Echo Request (Code 0)
@@ -90,8 +96,17 @@ def make_ICMP_Echo_Reply(echo_request: ICMPPacket) -> ICMPPacket:
     reply.type = ICMPType.ECHO_REP
     return reply
 
-def is_packet_destination_local(ip: IPv4Packet, ifs: list[InterfaceConfig]) -> bool:
-    return is_ip_addr_local(ip.dst, ifs)
+UDP_HEADER_LENGTH = 8
+
+@dataclass
+class UDPPacket:
+    source_port: int
+    dst_port: int
+    payload: Any | None = None
+    payload_length: int = 0
+
+class UDPPort(IntEnum):
+    QOTD = 17       # Quote Of The Day
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -102,7 +117,6 @@ from netsquid.components.models.qerrormodels import DepolarNoiseModel
 from netsquid.components import QuantumChannel, ClassicalChannel
 from netsquid.nodes import DirectConnection
 from netsquid.protocols import NodeProtocol
-from netsquid.components import QuantumProcessor
 from netsquid.qubits import qubitapi as qapi
 
 class IPNetworkNode(Node):
@@ -147,10 +161,21 @@ class PassiveRouterProtocol(NodeProtocol):
 
                     if is_packet_destination_local(in_pkt, self.node.if_configs):
                         print(f"Router {self.node.name} local dst {in_pkt.dst}")
-                        if isinstance(in_pkt.payload, ICMPPacket):
+                        if in_pkt.payload_proto == IPProto.ICMP:
+                            assert isinstance(in_pkt.payload, ICMPPacket)
                             icmp = in_pkt.payload
                             if icmp.type == ICMPType.ECHO_MSG:
                                 out_pkt = IPv4Packet(in_pkt.dst, in_pkt.src, IPProto.ICMP, make_ICMP_Echo_Reply(in_pkt.payload))
+                                next_hop_int = find_forward_interface(out_pkt.dst, self.node.routing_table, self.node.if_configs)
+                                if next_hop_int is not None:
+                                    self.node.ports[next_hop_int.name].tx_output(out_pkt)
+                        elif in_pkt.payload_proto == IPProto.UDP:
+                            assert isinstance(in_pkt.payload, UDPPacket)
+                            udp = in_pkt.payload
+                            if udp.dst_port == UDPPort.QOTD: # Maybe this shouldn't be a "Passive Router" functionality but a server service
+                                quote = "ciao ciao"
+                                quote_length = len(quote) + 1
+                                out_pkt = IPv4Packet(in_pkt.dst, in_pkt.src, IPProto.UDP, payload = UDPPacket(source_port=udp.dst_port, dst_port=udp.source_port, payload=quote, payload_length=quote_length), payload_length = UDP_HEADER_LENGTH+quote_length)
                                 next_hop_int = find_forward_interface(out_pkt.dst, self.node.routing_table, self.node.if_configs)
                                 if next_hop_int is not None:
                                     self.node.ports[next_hop_int.name].tx_output(out_pkt)
@@ -181,57 +206,143 @@ class SendPingProtocol(NodeProtocol):
         
         tx_rx_port = self.node.ports[self.node.interface_names[0]]
         icmp = make_ICMP_Echo_Request()
-        ip = IPv4Packet(ipaddress.IPv4Address("192.168.1.1"), ipaddress.IPv4Address("192.168.1.6"), IPProto.ICMP, icmp, icmp.total_length)
+        ip = IPv4Packet(ipaddress.IPv4Address("192.168.0.1"), ipaddress.IPv4Address("192.168.0.129"), IPProto.ICMP, icmp, icmp.total_length)
         tx_rx_port.tx_output(ip)
 
         yield self.await_port_input(tx_rx_port)
         end_time = ns.sim_time()
         print(f"[{end_time:.2f} ns] {self.node.name} received ACK. Round trip: {end_time - start_time:.2f} ns")
 
-def connect_nodes(node_a, node_b, port_a, port_b, distance: float):
+class AskQOTDProtocol(NodeProtocol):
+    def __init__(self, node):
+        super().__init__(node)
+        if not isinstance(self.node, IPNetworkNode):
+            raise TypeError("Node is not IP")
+
+    def run(self):
+        if not isinstance(self.node, IPNetworkNode):
+            raise TypeError("Node is not IP")
+        start_time = ns.sim_time()
+        print(f"[{start_time:.2f} ns] {self.node.name} sending QOTD req")
+        
+        tx_rx_port = self.node.ports[self.node.interface_names[0]]
+        udp = UDPPacket(1234, UDPPort.QOTD, None, 0)
+        ip = IPv4Packet(ipaddress.IPv4Address("192.168.0.17"), ipaddress.IPv4Address("192.168.0.133"), IPProto.UDP, udp, UDP_HEADER_LENGTH+udp.payload_length)
+        tx_rx_port.tx_output(ip)
+
+        yield self.await_port_input(tx_rx_port)
+        in_pkt = tx_rx_port.rx_input().items[0]
+        assert isinstance(in_pkt, IPv4Packet)
+        assert isinstance(in_pkt.payload, UDPPacket)
+        
+        end_time = ns.sim_time()
+        print(f"[{end_time:.2f} ns] {self.node.name} received QOTD {in_pkt.payload.payload}. Round trip: {end_time - start_time:.2f} ns")
+
+def connect_nodes(node_a: IPNetworkNode, node_b: IPNetworkNode, port_index_a, port_index_b, distance: int):
     """Utility to bridge two nodes with a standard classical connection."""
     delay_model = FibreDelayModel()
     
     # Create channels
-    c_abc = ClassicalChannel(f"ch_{node_a.name}_{node_b.name}", length=distance, models={"delay_model": delay_model})
-    c_bac = ClassicalChannel(f"ch_{node_b.name}_{node_a.name}", length=distance, models={"delay_model": delay_model})
+    c_ab = ClassicalChannel(f"ch_{node_a.name}_{node_b.name}", length=distance, models={"delay_model": delay_model})
+    c_ba = ClassicalChannel(f"ch_{node_b.name}_{node_a.name}", length=distance, models={"delay_model": delay_model})
     
     # Create connection
-    conn = DirectConnection(f"conn_{node_a.name}_{node_b.name}", channel_AtoB=c_abc, channel_BtoA=c_bac)
+    conn = DirectConnection(f"conn_{node_a.name}_{node_b.name}", channel_AtoB=c_ab, channel_BtoA=c_ba)
     
     # Connect
-    node_a.connect_to(remote_node=node_b, connection=conn, local_port_name=port_a, remote_port_name=port_b)
+    node_a.connect_to(remote_node=node_b, connection=conn, local_port_name=node_a.interface_names[port_index_a], remote_port_name=node_b.interface_names[port_index_b])
 
 if __name__ == "__main__":
-    node_a_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.1.1/30"))]
-    node_a_routing_table = [RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.1.2"))]
+    c1_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.1/30"))]
+    c1_rt = [RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.0.2"))]
 
-    node_int_ifs = [
-        InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.1.2/30")), 
-        InterfaceConfig("eht1", ipaddress.IPv4Interface("192.168.1.5/30"))
+    c2_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.17/30"))]
+    c2_rt = [RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.0.18"))]
+
+    s1_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.129/30"))]
+    s1_rt = [RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.0.130"))]
+
+    s2_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.133/30"))]
+    s2_rt = [RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.0.134"))]
+
+
+    r1_ifs = [
+        InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.2/30")), 
+        InterfaceConfig("eht1", ipaddress.IPv4Interface("192.168.0.5/30"))
         ]
-    node_int_routing_table = [
-        RoutingTableEntry(ipaddress.IPv4Network("192.168.1.0/30"), ipaddress.IPv4Address("192.168.1.1")),
-        RoutingTableEntry(ipaddress.IPv4Network("192.168.1.4/30"), ipaddress.IPv4Address("192.168.1.6"))
+    r1_rt = [
+        RoutingTableEntry(ipaddress.IPv4Network("192.168.0.0/30"), ipaddress.IPv4Address("192.168.0.1")),
+        RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.0.6"))
         ]
 
-    node_b_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.1.6/30"))]
-    node_b_routing_table = [RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.1.5"))]
+    r2_ifs = [
+        InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.18/30")), 
+        InterfaceConfig("eht1", ipaddress.IPv4Interface("192.168.0.21/30"))
+        ]
+    r2_rt = [
+        RoutingTableEntry(ipaddress.IPv4Network("192.168.0.16/30"), ipaddress.IPv4Address("192.168.0.17")),
+        RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.0.22"))
+        ]
+    
+    r3_ifs = [
+        InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.6/30")), 
+        InterfaceConfig("eht1", ipaddress.IPv4Interface("192.168.0.22/30")),
+        InterfaceConfig("eht2", ipaddress.IPv4Interface("192.168.0.65/30"))
+        ]
+    r3_rt = [
+        RoutingTableEntry(ipaddress.IPv4Network("192.168.0.0/28"), ipaddress.IPv4Address("192.168.0.5")),
+        RoutingTableEntry(ipaddress.IPv4Network("192.168.0.16/28"), ipaddress.IPv4Address("192.168.0.21")),
+        RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.0.66"))
+        ]
+    
+    r4_ifs = [
+        InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.130/30")), 
+        InterfaceConfig("eht1", ipaddress.IPv4Interface("192.168.0.134/30")),
+        InterfaceConfig("eht2", ipaddress.IPv4Interface("192.168.0.66/30"))
+        ]
+    r4_rt = [
+        RoutingTableEntry(ipaddress.IPv4Network("192.168.0.128/30"), ipaddress.IPv4Address("192.168.0.129")),
+        RoutingTableEntry(ipaddress.IPv4Network("192.168.0.132/30"), ipaddress.IPv4Address("192.168.0.133")),
+        RoutingTableEntry(ipaddress.IPv4Network("0.0.0.0/0"), ipaddress.IPv4Address("192.168.0.65"))
+        ]
 
-    req_node = IPNetworkNode("req", node_a_ifs, node_a_routing_table)
-    int_node = IPNetworkNode("int", node_int_ifs, node_int_routing_table)
-    rep_node = IPNetworkNode("rep", node_b_ifs, node_b_routing_table)
+    c1_node = IPNetworkNode("c1", c1_ifs, c1_rt)
+    c2_node = IPNetworkNode("c2", c2_ifs, c2_rt)
+    s1_node = IPNetworkNode("s1", s1_ifs, s1_rt)
+    s2_node = IPNetworkNode("s2", s2_ifs, s2_rt)
+    r1_node = IPNetworkNode("r1", r1_ifs, r1_rt)
+    r2_node = IPNetworkNode("r2", r2_ifs, r2_rt)
+    r3_node = IPNetworkNode("r3", r3_ifs, r3_rt)
+    r4_node = IPNetworkNode("r4", r4_ifs, r4_rt)
 
-    connect_nodes(req_node, int_node, req_node.interface_names[0], int_node.interface_names[0], 1)
-    connect_nodes(int_node, rep_node, int_node.interface_names[1], rep_node.interface_names[0], 1)
+    distance = 5 # km
 
-    loc_pr = SendPingProtocol(req_node)
-    int_pr = PassiveRouterProtocol(int_node)
-    rem_pr = PassiveRouterProtocol(rep_node)
+    connect_nodes(c1_node, r1_node, 0, 0, distance)
+    connect_nodes(r1_node, r3_node, 1, 0, distance)
+    connect_nodes(c2_node, r2_node, 0, 0, distance+1)
+    connect_nodes(r2_node, r3_node, 1, 1, distance)
+    connect_nodes(s1_node, r4_node, 0, 0, distance)
+    connect_nodes(s2_node, r4_node, 0, 1, distance)
+    connect_nodes(r3_node, r4_node, 2, 2, distance)
 
-    rem_pr.start()
-    int_pr.start()
-    loc_pr.start()
+    c1_pr = SendPingProtocol(c1_node)
+    c2_pr = AskQOTDProtocol(c2_node)
+    s1_pr = PassiveRouterProtocol(s1_node)
+    s2_pr = PassiveRouterProtocol(s2_node)
+    r1_pr = PassiveRouterProtocol(r1_node)
+    r2_pr = PassiveRouterProtocol(r2_node)
+    r3_pr = PassiveRouterProtocol(r3_node)
+    r4_pr = PassiveRouterProtocol(r4_node)
+
+    c1_pr.start()
+    c2_pr.start()
+    s1_pr.start()
+    s2_pr.start()
+    r1_pr.start()
+    r2_pr.start()
+    r3_pr.start()
+    r4_pr.start()
+
     run_stats = ns.sim_run()
 
     print(run_stats)
