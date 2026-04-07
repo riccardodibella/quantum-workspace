@@ -114,16 +114,19 @@ import netsquid as ns
 from netsquid.nodes import Node
 from netsquid.components.models import FibreDelayModel
 from netsquid.components.models.qerrormodels import DepolarNoiseModel
-from netsquid.components import QuantumChannel, ClassicalChannel
+from netsquid.components import QuantumChannel, ClassicalChannel, QuantumErrorModel
 from netsquid.nodes import DirectConnection
 from netsquid.protocols import NodeProtocol
 from netsquid.qubits import qubitapi as qapi
+
+def qport(classical_port_name: str):
+    return f"{classical_port_name}_q"
 
 class IPNetworkNode(Node):
     def __init__(self, name, interface_configs: list[InterfaceConfig], routing_table: list[RoutingTableEntry]):
         port_names = []
         for i in interface_configs:
-            port_names += [i.name]
+            port_names += [i.name, qport(i.name)]
         super().__init__(name, port_names=port_names)
         self.if_configs = interface_configs
         self.routing_table = routing_table
@@ -173,7 +176,7 @@ class PassiveRouterProtocol(NodeProtocol):
                             assert isinstance(in_pkt.payload, UDPPacket)
                             udp = in_pkt.payload
                             if udp.dst_port == UDPPort.QOTD: # Maybe this shouldn't be a "Passive Router" functionality but a server service
-                                quote = "ciao ciao"
+                                quote = "Variables won't; constants aren't. (Osborn's Law)"
                                 quote_length = len(quote) + 1
                                 out_pkt = IPv4Packet(in_pkt.dst, in_pkt.src, IPProto.UDP, payload = UDPPacket(source_port=udp.dst_port, dst_port=udp.source_port, payload=quote, payload_length=quote_length), payload_length = UDP_HEADER_LENGTH+quote_length)
                                 next_hop_int = find_forward_interface(out_pkt.dst, self.node.routing_table, self.node.if_configs)
@@ -187,7 +190,7 @@ class PassiveRouterProtocol(NodeProtocol):
                                 print(f"Router {self.node.name} fwd to interface {next_hop_int.name}")
                                 self.node.ports[next_hop_int.name].tx_output(in_pkt)
                             else:
-                                print(f"Packet dropped at node {self.node.name} (TTL expired)")
+                                print(f"Packet dropped at node {self.node.name} (TTL expired)")                                
                         else:
                             print(f"Packet dropped at node {self.node.name} (Routing failed)")
 
@@ -236,21 +239,21 @@ class AskQOTDProtocol(NodeProtocol):
         assert isinstance(in_pkt.payload, UDPPacket)
         
         end_time = ns.sim_time()
-        print(f"[{end_time:.2f} ns] {self.node.name} received QOTD {in_pkt.payload.payload}. Round trip: {end_time - start_time:.2f} ns")
+        print(f"[{end_time:.2f} ns] {self.node.name} received QOTD \"{in_pkt.payload.payload}\". Round trip: {end_time - start_time:.2f} ns")
 
-def connect_nodes(node_a: IPNetworkNode, node_b: IPNetworkNode, port_index_a, port_index_b, distance: int):
+def connect_nodes(node_a: IPNetworkNode, node_b: IPNetworkNode, port_index_a, port_index_b, distance: int, quantum_noise_model: None | QuantumErrorModel = None):
     """Utility to bridge two nodes with a standard classical connection."""
     delay_model = FibreDelayModel()
     
-    # Create channels
-    c_ab = ClassicalChannel(f"ch_{node_a.name}_{node_b.name}", length=distance, models={"delay_model": delay_model})
-    c_ba = ClassicalChannel(f"ch_{node_b.name}_{node_a.name}", length=distance, models={"delay_model": delay_model})
-    
-    # Create connection
-    conn = DirectConnection(f"conn_{node_a.name}_{node_b.name}", channel_AtoB=c_ab, channel_BtoA=c_ba)
-    
-    # Connect
+    c_ab = ClassicalChannel(f"c_ch_{node_a.name}_{node_b.name}", length=distance, models={"delay_model": delay_model})
+    c_ba = ClassicalChannel(f"c_ch_{node_b.name}_{node_a.name}", length=distance, models={"delay_model": delay_model})
+    conn = DirectConnection(f"c_conn_{node_a.name}_{node_b.name}", channel_AtoB=c_ab, channel_BtoA=c_ba)
     node_a.connect_to(remote_node=node_b, connection=conn, local_port_name=node_a.interface_names[port_index_a], remote_port_name=node_b.interface_names[port_index_b])
+
+    q_ab = QuantumChannel(f"q_ch_{node_a.name}_{node_b.name}", length=distance, models={"delay_model": delay_model, "quantum_noise_model": quantum_noise_model})
+    q_ba = QuantumChannel(f"q_ch_{node_b.name}_{node_a.name}", length=distance, models={"delay_model": delay_model, "quantum_noise_model": quantum_noise_model})
+    q_conn = DirectConnection(f"q_conn_{node_a.name}_{node_b.name}", channel_AtoB=q_ab, channel_BtoA=q_ba)
+    node_a.connect_to(remote_node=node_b, connection=q_conn, local_port_name=qport(node_a.interface_names[port_index_a]), remote_port_name=qport(node_b.interface_names[port_index_b]))
 
 if __name__ == "__main__":
     c1_ifs = [InterfaceConfig("eht0", ipaddress.IPv4Interface("192.168.0.1/30"))]
@@ -316,8 +319,9 @@ if __name__ == "__main__":
     r4_node = IPNetworkNode("r4", r4_ifs, r4_rt)
 
     distance = 5 # km
+    loss_model = DepolarNoiseModel(depolar_rate=0.01)
 
-    connect_nodes(c1_node, r1_node, 0, 0, distance)
+    connect_nodes(c1_node, r1_node, 0, 0, distance, loss_model)
     connect_nodes(r1_node, r3_node, 1, 0, distance)
     connect_nodes(c2_node, r2_node, 0, 0, distance+1)
     connect_nodes(r2_node, r3_node, 1, 1, distance)
