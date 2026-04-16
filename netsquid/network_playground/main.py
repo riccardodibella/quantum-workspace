@@ -1,7 +1,7 @@
 # pyright: basic
 
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import Enum, IntEnum
 from functools import reduce
 import ipaddress
 import copy
@@ -100,13 +100,14 @@ UDP_HEADER_LENGTH = 8
 
 @dataclass
 class UDPPacket:
-    source_port: int
+    src_port: int
     dst_port: int
     payload: Any | None = None
     payload_length: int = 0
 
 class UDPPort(IntEnum):
     QOTD = 17       # Quote Of The Day
+    SEDP = 9224     # Stupid Entanglement Distribution Protocol
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -118,6 +119,8 @@ from netsquid.components import QuantumChannel, ClassicalChannel, QuantumErrorMo
 from netsquid.nodes import DirectConnection
 from netsquid.protocols import NodeProtocol
 from netsquid.qubits import qubitapi as qapi
+from netsquid.components import QuantumProcessor # type: ignore
+
 
 def qport(classical_port_name: str):
     return f"{classical_port_name}_q"
@@ -178,7 +181,7 @@ class PassiveRouterProtocol(NodeProtocol):
                             if udp.dst_port == UDPPort.QOTD: # Maybe this shouldn't be a "Passive Router" functionality but a server service
                                 quote = "Variables won't; constants aren't. (Osborn's Law)"
                                 quote_length = len(quote) + 1
-                                out_pkt = IPv4Packet(in_pkt.dst, in_pkt.src, IPProto.UDP, payload = UDPPacket(source_port=udp.dst_port, dst_port=udp.source_port, payload=quote, payload_length=quote_length), payload_length = UDP_HEADER_LENGTH+quote_length)
+                                out_pkt = IPv4Packet(in_pkt.dst, in_pkt.src, IPProto.UDP, payload = UDPPacket(src_port=udp.dst_port, dst_port=udp.src_port, payload=quote, payload_length=quote_length), payload_length = UDP_HEADER_LENGTH+quote_length)
                                 next_hop_int = find_forward_interface(out_pkt.dst, self.node.routing_table, self.node.if_configs)
                                 if next_hop_int is not None:
                                     self.node.ports[next_hop_int.name].tx_output(out_pkt)
@@ -240,6 +243,144 @@ class AskQOTDProtocol(NodeProtocol):
         
         end_time = ns.sim_time()
         print(f"[{end_time:.2f} ns] {self.node.name} received QOTD \"{in_pkt.payload.payload}\". Round trip: {end_time - start_time:.2f} ns")
+
+
+class SEDPMsgType(IntEnum):
+    ENT_REQ = 1
+    ENT_REQ_ACK = 2
+    ENT_SWAP_DONE = 3
+    ENT_SWAP_ACK = 4
+
+@dataclass
+class SEDPPacket:
+    msg_type: SEDPMsgType
+    client_side_req_id: int
+    server_side_req_id: int
+    destination_ip: ipaddress.IPv4Address
+    source_ip: ipaddress.IPv4Address
+
+SEDP_PACKET_FIXED_LENGHT = 20
+
+
+
+class SEDP_FSM_STATE(IntEnum):
+    IDLE = 0
+    WAIT_QUBIT = 1
+
+class EntanglementServerProtocol(NodeProtocol):
+    def __init__(self, node):
+        super().__init__(node)
+        if not isinstance(self.node, IPNetworkNode):
+            raise TypeError("Node is not IP")
+        self.qprocessor = QuantumProcessor("loc_processor", num_positions=1)
+        self.node.add_subcomponent(self.qprocessor)
+
+    def run(self):
+        if not isinstance(self.node, IPNetworkNode):
+            raise TypeError("Node is not IP")
+        
+        c_port_name = self.node.interface_names[0]
+        c_port = self.node.ports[c_port_name]
+        q_port = self.node.ports[qport(c_port_name)]
+
+        
+        udp_remote_port_number = 0
+
+        cl_req_id = 0
+        srv_req_id = 6 # will be changed
+
+        my_ip = self.node.if_configs[0].conf.ip
+
+        client_ip = ipaddress.IPv4Address("0.0.0.0")
+        client_port = 0
+
+        fsm_st: SEDP_FSM_STATE = SEDP_FSM_STATE.IDLE
+
+        while True:
+            yield self.await_port_input(c_port)
+            in_pkt = c_port.rx_input().items[0]
+            assert isinstance(in_pkt, IPv4Packet)
+            if in_pkt.payload_proto == IPProto.UDP:
+                assert isinstance(in_pkt.payload, UDPPacket)
+
+                udp = in_pkt.payload
+
+                if fsm_st == SEDP_FSM_STATE.IDLE and udp.dst_port == UDPPort.SEDP:
+                    assert isinstance(udp.payload, SEDPPacket)
+                    req = udp.payload
+                    print("Received SEDP REQ")
+
+                    cl_req_id = req.client_side_req_id
+                    client_ip = req.source_ip
+                    client_port = udp.src_port
+
+                    resp_sedp = SEDPPacket(SEDPMsgType.ENT_REQ_ACK, cl_req_id, srv_req_id, my_ip, client_ip)
+                    udp = UDPPacket(UDPPort.SEDP, client_port, resp_sedp, SEDP_PACKET_FIXED_LENGHT)
+
+                    self.node.ports[qport(c_port_name)].forward_input(self.qprocessor.ports["qin"])
+                    self.qprocessor.ports["qout"].forward_output(self.node.ports[qport(c_port_name)])
+
+                    ip = IPv4Packet(my_ip, client_ip, IPProto.UDP, udp, UDP_HEADER_LENGTH+udp.payload_length)
+                    c_port.tx_output(ip)
+
+                    fsm_st = SEDP_FSM_STATE.WAIT_QUBIT
+
+                    
+
+
+
+
+class EntanglementClientProtocol(NodeProtocol):
+    def __init__(self, node):
+        super().__init__(node)
+        if not isinstance(self.node, IPNetworkNode):
+            raise TypeError("Node is not IP")
+
+    def run(self):
+        if not isinstance(self.node, IPNetworkNode):
+            raise TypeError("Node is not IP")
+        
+        c_port_name = self.node.interface_names[0]
+        c_port = self.node.ports[c_port_name]
+        q_port = self.node.ports[qport(c_port_name)]
+
+        
+        udp_local_port_number = 2345
+
+        my_req_id = 5
+        srv_req_id = 0 # will be changed
+
+        my_ip = self.node.if_configs[0].conf.ip
+        print(f"my_ip {my_ip}")
+
+        end_server_ip = ipaddress.IPv4Address("10.0.0.2")
+
+        link_dst_ip = end_server_ip # possibly update after ICMP expired
+        link_src_ip = my_ip
+
+        sedp_req = SEDPPacket(SEDPMsgType.ENT_REQ, my_req_id, srv_req_id, end_server_ip, my_ip)
+
+        udp = UDPPacket(udp_local_port_number, UDPPort.SEDP, sedp_req, SEDP_PACKET_FIXED_LENGHT)
+        ip = IPv4Packet(link_src_ip, link_dst_ip, IPProto.UDP, udp, UDP_HEADER_LENGTH+udp.payload_length, ttl=1)
+        c_port.tx_output(ip)
+
+        yield self.await_port_input(c_port)
+        in_pkt = c_port.rx_input().items[0]
+        assert isinstance(in_pkt, IPv4Packet)
+        if in_pkt.payload_proto == IPProto.UDP:
+            assert isinstance(in_pkt.payload, UDPPacket)
+
+            udp = in_pkt.payload
+
+            if udp.dst_port == udp_local_port_number and udp.src_port == UDPPort.SEDP:
+                assert isinstance(udp.payload, SEDPPacket)
+                sedp_resp = udp.payload
+                print("Received SEDP ACK")
+
+
+
+
+
 
 def connect_nodes(node_a: IPNetworkNode, node_b: IPNetworkNode, port_index_a, port_index_b, distance: int, quantum_noise_model: None | QuantumErrorModel = None):
     """Utility to bridge two nodes with a standard classical connection."""
@@ -346,6 +487,25 @@ if __name__ == "__main__":
     r2_pr.start()
     r3_pr.start()
     r4_pr.start()
+
+
+
+    ent_client_ifs = [InterfaceConfig("eth0", ipaddress.IPv4Interface("10.0.0.1/30"))]
+    ent_server_ifs = [InterfaceConfig("eth0", ipaddress.IPv4Interface("10.0.0.2/30"))]
+
+    ent_client_rt = [RoutingTableEntry(ipaddress.IPv4Network("10.0.0.0/30"), ipaddress.IPv4Address("10.0.0.2"))]
+    ent_server_rt = [RoutingTableEntry(ipaddress.IPv4Network("10.0.0.0/30"), ipaddress.IPv4Address("10.0.0.1"))]
+
+    ent_client_node = IPNetworkNode("ent_client", ent_client_ifs, ent_client_rt)
+    ent_server_node = IPNetworkNode("ent_server", ent_server_ifs, ent_server_rt)
+
+    connect_nodes(ent_client_node, ent_server_node, 0, 0, distance=2, quantum_noise_model=loss_model)
+
+    ent_client_pr = EntanglementClientProtocol(ent_client_node)    
+    ent_server_pr = EntanglementServerProtocol(ent_server_node)
+
+    ent_client_pr.start()
+    ent_server_pr.start()
 
     run_stats = ns.sim_run()
 
