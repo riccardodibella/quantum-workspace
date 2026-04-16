@@ -1,20 +1,34 @@
 #!/bin/bash
 
-# Get the path to the netsquid folder dynamically
-NS_PATH=$(python3 -c "import netsquid; print(netsquid.__path__[0])")
-
-# Ensure the output directory exists
+# Ensure output directory exists
 mkdir -p ./typings
 
-# Loop through all compiled .so files
-for file in $(find "$NS_PATH" -name "*.so"); do
-    # Strip path prefix, strip extension, and swap / for .
-    MODULE=$(echo "$file" | sed "s|.*/netsquid|netsquid|; s|\.cpython.*||; s|/|.|g")
-    
-    echo "Stubs for: $MODULE"
-    # Output specifically to the typings folder
-    pybind11-stubgen "$MODULE" -o ./typings
-done
+# List of packages to stub
+PACKAGES=("netsquid" "pydynaa")
 
-# Touch py.typed to make it official for the IDE
-touch ./typings/netsquid/py.typed 2>/dev/null
+for PKG in "${PACKAGES[@]}"; do
+    # Get the path to the package dynamically
+    PKG_PATH=$(python3 -c "import $PKG; print($PKG.__path__[0])" 2>/dev/null)
+    
+    if [ -z "$PKG_PATH" ]; then
+        echo "Skipping $PKG: Not found in current environment."
+        continue
+    fi
+
+    echo "Processing $PKG at $PKG_PATH..."
+
+    # Loop through all compiled .so files
+    for file in $(find "$PKG_PATH" -name "*.so"); do
+        # 1. Match the package name in the path and keep everything after it
+        # 2. Strip the extension
+        # 3. Swap / for . 
+        MODULE=$(echo "$file" | sed "s|.*/$PKG|$PKG|; s|\.cpython.*||; s|/|.|g")
+        
+        echo "  -> Stubbing: $MODULE"
+        pybind11-stubgen "$MODULE" -o ./typings
+    done
+
+    # Add the secret handshake file for the IDE
+    mkdir -p "./typings/$PKG"
+    touch "./typings/$PKG/py.typed"
+done
