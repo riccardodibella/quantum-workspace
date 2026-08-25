@@ -1,0 +1,13 @@
+.coverage
+.mypy_cache/
+.pytest_cache/
+.cache/
+
+
+dist/
+
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+*.egg-info/
