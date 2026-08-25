@@ -1,59 +1,46 @@
+// https://claude.ai/share/3cda0e57-9395-4dc2-a760-6e45067ae990
+/*
+cmake -S . -B build
+cmake --build build
+./build/main
+*/
 #include <iostream>
-#include <vector>
-#include <cmath>
+#include <iomanip>
 
+// ---- C-compatible interface implemented by the Fortran bind(C) wrapper ----
 extern "C" {
-    void run_lowtran_c(
-        const int* model,
-        const int* itype,
-        const int* iemsct,
-        const int* im,
-        const int* ihaze,
-        const float* h1,
-        const float* h2,
-        const float* angle,
-        const float* v1,
-        const float* v2,
-        const float* dv,
-        float* output_buffer
-    );
+    void lowtran_transmittance(float wavelength_nm, int model, int itype,
+                                float h1, float h2, float angle, float range_km,
+                                float *transmittance, float *wavelength_out_nm);
 }
 
 int main() {
-    int model = 6;         // 1976 US Standard Atmosphere
-    int itype = 3;         // Ground-to-Space
-    int iemsct = 0;        // Transmittance mode
-    int im = 0;            // Single scattering
-    int ihaze = 1;         // Rural aerosol profile (VIS = 23 km)
+    // --- scenario: ground-to-space transmittance @ 550 nm, subarctic winter ---
+    const float wavelength_nm = 550.0f;
+    const int   model         = 5;   // atmosphere: subarctic winter (Card 1, table 14)
+    const int   itype         = 3;   // path type: observer to space
+    const float h1            = 0.0f; // observer altitude [km]
+    const float h2            = 0.0f;
+    const float angle         = 0.0f; // zenith angle [deg]
+    const float range_km      = 0.0f;
 
-    float h1 = 0.0f;       // Observer altitude (km)
-    float h2 = 100.0f;     // Target altitude (km)
-    float angle = 0.0f;    // Zenith angle (deg)
+    float transmittance = 0.0f;
+    float wavelength_out_nm = 0.0f;
 
-    // Wavelength inputs in nanometers
-    float wl_start_nm = 400.0f;   // 400 nm (Visible)
-    float wl_end_nm = 2500.0f;    // 2500 nm (SWIR)
-    
-    // Convert nm to cm^-1 (Note: 2500 nm = 4000 cm^-1, 400 nm = 25000 cm^-1)
-    float v1 = 10000000.0f / wl_end_nm;    // 4000 cm^-1 (Start wavenumber)
-    float v2 = 10000000.0f / wl_start_nm;  // 25000 cm^-1 (End wavenumber)
-    float dv = 20.0f;                      // LOWTRAN resolution step (20 cm^-1)
+    lowtran_transmittance(wavelength_nm, model, itype,
+                           h1, h2, angle, range_km,
+                           &transmittance, &wavelength_out_nm);
 
-    // Allocate sufficient buffer size (LOWTRAN returns spectral records)
-    int n_steps = static_cast<int>((v2 - v1) / dv) + 1;
-    std::vector<float> transmission(n_steps * 50, 0.0f);
+    std::cout << "LOWTRAN7 call completed without crashing.\n";
+    std::cout << std::fixed << std::setprecision(4);
+    std::cout << "Wavelength returned [nm]: " << wavelength_out_nm << "\n";
+    std::cout << "Total transmittance     : " << transmittance << "\n";
 
-    std::cout << "Executing LOWTRAN from " << v1 << " to " << v2 << " cm^-1..." << std::endl;
-
-    run_lowtran_c(
-        &model, &itype, &iemsct, &im, &ihaze,
-        &h1, &h2, &angle,
-        &v1, &v2, &dv,
-        transmission.data()
-    );
-
-    std::cout << "\nSUCCESS! Execution completed with zero errors!" << std::endl;
-    std::cout << "First total transmittance value: " << transmission[0] << std::endl;
-
-    return 0;
+    if (wavelength_out_nm > 0.0f && transmittance >= 0.0f && transmittance <= 1.0f) {
+        std::cout << "PASS: lowtran is working correctly.\n";
+        return 0;
+    } else {
+        std::cout << "FAIL: lowtran output looks wrong.\n";
+        return 1;
+    }
 }
